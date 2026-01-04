@@ -1,0 +1,183 @@
+# Enhanced Docker Compose stack for rs3gw development
+# Includes rs3gw, Prometheus, Grafana, Jaeger, and MinIO for testing
+
+version: '3.9'
+
+services:
+  # rs3gw - Main S3 Gateway
+  rs3gw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rs3gw
+    ports:
+      - "9000:9000"  # S3 API
+      - "9090:9090"  # Metrics
+    environment:
+      - RS3GW_BIND_ADDR=0.0.0.0:9000
+      - RS3GW_STORAGE_ROOT=/data
+      - RS3GW_DEFAULT_BUCKET=default
+      - RS3GW_ACCESS_KEY=minioadmin
+      - RS3GW_SECRET_KEY=minioadmin
+      - RS3GW_COMPRESSION=zstd:3
+      - RS3GW_CACHE_ENABLED=true
+      - RS3GW_CACHE_MAX_SIZE_MB=512
+      - RS3GW_DEDUP_ENABLED=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - RUST_LOG=info,rs3gw=debug
+    volumes:
+      - rs3gw_data:/data
+    networks:
+      - rs3gw_network
+    depends_on:
+      - jaeger
+      - prometheus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # MinIO - S3-compatible storage for testing backend integration
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9001:9000"
+      - "9002:9001"  # Console
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - rs3gw_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--storage.tsdb.retention.time=7d'
+    networks:
+      - rs3gw_network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Grafana - Metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - rs3gw_network
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Jaeger - Distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "16686:16686" # Jaeger UI
+      - "14268:14268" # Jaeger collector
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - LOG_LEVEL=info
+    networks:
+      - rs3gw_network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Redis - Optional caching backend
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - rs3gw_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # PostgreSQL - Optional metadata backend
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=rs3gw
+      - POSTGRES_PASSWORD=rs3gw
+      - POSTGRES_DB=rs3gw
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - rs3gw_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rs3gw"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  rs3gw_data:
+    driver: local
+  minio_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  rs3gw_network:
+    driver: bridge

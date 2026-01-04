@@ -1,0 +1,17 @@
+rs3gw - S3-Compatible Gateway in Rust
+Copyright 2026 COOLJAPAN OÜ (Team KitaSan)
+
+This software is dual-licensed under MIT License and Apache License 2.0. Please see the LICENSE file for details.
+
+This implementation uses several Rust crates from third parties, including:
+- axum (web framework)
+- tokio (async runtime)
+- tower (middleware)
+- serde (serialization)
+- tracing (logging)
+- quick-xml (XML parsing)
+- sha2/md5/hmac (cryptographic hashing)
+- base64 (encoding)
+
+Each of these third-party components may have their own licenses.
+Please see their respective license files for details.

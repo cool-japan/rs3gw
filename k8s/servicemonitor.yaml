@@ -1,0 +1,17 @@
+# ServiceMonitor for Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rs3gw
+  namespace: rs3gw
+  labels:
+    app.kubernetes.io/name: rs3gw
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rs3gw
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

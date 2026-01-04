@@ -1,0 +1,22 @@
+{
+  "name": "rs3gw-client-example",
+  "version": "1.0.0",
+  "description": "rs3gw JavaScript/Node.js client example",
+  "main": "rs3gw-client.js",
+  "scripts": {
+    "demo": "node rs3gw-client.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "rs3gw",
+    "s3",
+    "object-storage",
+    "aws-sdk"
+  ],
+  "author": "COOLJAPAN OU (Team Kitasan)",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.490.0",
+    "@aws-sdk/lib-storage": "^3.490.0"
+  }
+}

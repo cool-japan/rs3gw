@@ -1,0 +1,33 @@
+{
+  "id": "audio-feature-extraction",
+  "name": "Audio Feature Extraction",
+  "version": "1.0.0",
+  "description": "Extract audio features (spectrograms, MFCCs) for speech recognition and audio classification",
+  "steps": [
+    {
+      "id": "extract_features",
+      "step_type": "audio_features",
+      "config": {
+        "feature_type": "mel_spectrogram",
+        "sample_rate": 16000,
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "f_min": 0.0,
+        "f_max": 8000.0,
+        "normalize": true
+      },
+      "cache_results": true,
+      "description": "Extract Mel spectrogram features from audio"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "audio-ml-team",
+    "target_model": "Wav2Vec2/Whisper/Audio Classifier",
+    "dataset": "LibriSpeech/AudioSet",
+    "use_case": "Speech recognition and audio classification",
+    "recommended_batch_size": 16,
+    "notes": "Optimized for speech and audio understanding tasks"
+  }
+}

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rs3gw
+  labels:
+    app.kubernetes.io/name: rs3gw
+    app.kubernetes.io/component: storage

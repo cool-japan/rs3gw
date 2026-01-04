@@ -1,0 +1,52 @@
+{
+  "id": "training-augmentation",
+  "name": "Training Data Augmentation",
+  "version": "1.1.0",
+  "description": "Comprehensive data augmentation pipeline for robust training",
+  "steps": [
+    {
+      "id": "resize",
+      "step_type": "image_resize",
+      "config": {
+        "width": 256,
+        "height": 256,
+        "mode": "fill",
+        "filter": "bilinear"
+      },
+      "cache_results": false,
+      "description": "Resize and crop to 256x256"
+    },
+    {
+      "id": "augment",
+      "step_type": "data_augmentation",
+      "config": {
+        "horizontal_flip_prob": 0.5,
+        "vertical_flip_prob": 0.0,
+        "rotation_range": 15.0,
+        "brightness_range": [0.8, 1.2],
+        "contrast_range": [0.8, 1.2],
+        "saturation_range": null,
+        "random_crop_size": null
+      },
+      "cache_results": false,
+      "description": "Apply random augmentation for training robustness"
+    },
+    {
+      "id": "normalize",
+      "step_type": "image_normalization",
+      "config": {
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.5, 0.5, 0.5],
+        "normalize_range": true
+      },
+      "cache_results": false,
+      "description": "Normalize to [-1, 1] range"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "ml-engineer",
+    "use_case": "training",
+    "performance_impact": "moderate"
+  }
+}

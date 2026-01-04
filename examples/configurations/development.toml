@@ -1,0 +1,55 @@
+# rs3gw Development Configuration
+# For local development and testing
+
+[server]
+bind_addr = "127.0.0.1:9000"
+request_timeout = 300  # 5 minutes
+max_concurrent = 0  # Unlimited for development
+
+[storage]
+root = "./data/dev"
+default_bucket = "test-bucket"
+compression = "none"  # Disable for faster iteration
+
+[auth]
+# Development mode - no authentication
+access_key = ""
+secret_key = ""
+
+[cache]
+enabled = true
+max_size_mb = 128  # Small cache for development
+max_objects = 1000
+ttl = 60  # 1 minute TTL for quick testing
+
+[dedup]
+enabled = false  # Disable for faster writes during development
+
+[zerocopy]
+direct_io = false  # Disable for compatibility
+splice = false
+mmap = true  # Keep mmap for metadata
+
+[logging]
+level = "debug"  # Verbose logging for development
+format = "pretty"  # Human-readable format
+
+[metrics]
+enabled = true
+prometheus_port = 9090
+
+[observability]
+profiling_enabled = true
+profiling_interval = 30  # 30 seconds
+anomaly_detection_enabled = false  # Disable to reduce noise
+
+[cluster]
+enabled = false  # Single node for development
+
+# Development features
+[features]
+wasm_plugins = true
+video_transcoding = false  # Heavy dependency, disable by default
+graphql = true
+websocket = true
+grpc = true

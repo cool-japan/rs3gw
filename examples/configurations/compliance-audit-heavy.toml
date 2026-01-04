@@ -1,0 +1,224 @@
+# rs3gw Compliance Configuration
+# For environments with strict regulatory requirements (SOC2, HIPAA, GDPR)
+# Maximum audit logging, encryption, and data retention
+
+[server]
+bind_addr = "0.0.0.0:9000"
+request_timeout = 300
+max_concurrent = 500  # Conservative limit
+
+[tls]
+enabled = true
+cert_path = "/etc/rs3gw/certs/server.crt"
+key_path = "/etc/rs3gw/certs/server.key"
+min_tls_version = "1.3"  # TLS 1.3 minimum for compliance
+cipher_suites = [
+    "TLS_AES_256_GCM_SHA384",
+    "TLS_CHACHA20_POLY1305_SHA256"
+]
+
+[storage]
+root = "/var/lib/rs3gw/data"
+default_bucket = "default"
+compression = "zstd:5"  # Good compression for archival
+
+[auth]
+access_key = "${RS3GW_ACCESS_KEY}"
+secret_key = "${RS3GW_SECRET_KEY}"
+# Enforce MFA for sensitive operations (future feature)
+mfa_required = true
+session_timeout = 900  # 15 minutes
+
+[encryption]
+# Encryption at rest (mandatory for compliance)
+enabled = true
+algorithm = "AES-256-GCM"
+key_rotation_days = 90  # Rotate keys every 90 days
+# Integration with HSM/KMS (future feature)
+kms_provider = "aws-kms"  # or "vault", "local"
+kms_key_id = "${KMS_KEY_ID}"
+
+[cache]
+enabled = true
+max_size_mb = 1024  # 1GB
+max_objects = 50000
+ttl = 300  # 5 minutes (shorter for data freshness)
+# Encrypt cache contents
+cache_encryption = true
+
+[dedup]
+enabled = true
+block_size = 65536
+algorithm = "content-defined"
+min_size = 131072
+# Maintain dedup map for forensics
+preserve_dedup_map = true
+
+[zerocopy]
+direct_io = true
+direct_io_threshold = 1048576
+splice = true
+mmap = true
+
+[throttle]
+enabled = true
+rps = 5000
+upload_mbps = 500
+download_mbps = 500
+
+[quota]
+enabled = true
+max_storage_gb = 1000
+max_objects = 1000000
+# Enforce strict quotas for data retention compliance
+enforce_strict = true
+
+[logging]
+level = "info"
+format = "json"
+destination = "file"
+file_path = "/var/log/rs3gw/rs3gw.log"
+rotation_size_mb = 100
+rotation_count = 365  # Keep 1 year of logs
+rotation_compression = "gzip"
+# Log encryption
+log_encryption = true
+
+[metrics]
+enabled = true
+prometheus_port = 9090
+# Sensitive metric filtering
+filter_sensitive_metrics = true
+
+[observability]
+profiling_enabled = true
+profiling_interval = 600  # 10 minutes
+profiling_retention = 90  # 90 days
+anomaly_detection_enabled = true
+anomaly_threshold_sigma = 2.0  # More sensitive detection
+anomaly_alert_threshold = "Medium"  # Alert on Medium+ severity
+
+[audit]
+# Comprehensive audit logging (required for compliance)
+enabled = true
+log_path = "/var/log/rs3gw/audit.log"
+chain_verification = true  # Cryptographic chain verification
+hash_algorithm = "SHA-256"
+rotation_size_mb = 50
+rotation_count = 730  # 2 years of audit logs
+rotation_compression = "gzip"
+
+# Log all operations
+log_all_operations = true
+log_failed_attempts = true
+log_authentication = true
+log_authorization = true
+log_data_access = true
+log_data_modification = true
+log_administrative_actions = true
+
+# Forwarding to SIEM
+forwarding_enabled = true
+forwarding_destinations = [
+    "syslog://siem.internal:514",
+    "s3://compliance-audit-logs/rs3gw/",
+    "webhook://https://siem.internal/api/events"
+]
+forwarding_encryption = true
+forwarding_retry_attempts = 10
+
+# Compliance reporting
+compliance_enabled = true
+compliance_standards = ["SOC2", "HIPAA", "GDPR"]
+compliance_report_interval = 86400  # Daily
+compliance_report_path = "/var/lib/rs3gw/compliance-reports"
+
+[self_healing]
+enabled = true
+check_interval = 3600  # Hourly integrity checks
+repair_enabled = true
+max_concurrent_repairs = 5
+corruption_threshold = 0.001  # 0.1% (very strict)
+corruption_alert = true  # Alert on any corruption
+auto_cleanup_enabled = false  # Manual approval for deletions
+retention_days = 365  # 1 year minimum retention
+
+[versioning]
+# Enable versioning for all buckets (compliance requirement)
+default_enabled = true
+version_retention_days = 2555  # 7 years for some regulations
+max_versions_per_object = 100
+
+[object_lock]
+# WORM (Write Once Read Many) compliance
+enabled = true
+default_mode = "COMPLIANCE"  # Cannot be bypassed
+default_retention_days = 2555  # 7 years
+
+[lifecycle]
+# Automatic lifecycle management for compliance
+enabled = true
+# Transition to archive storage after 90 days
+archive_after_days = 90
+# Delete after retention period
+delete_after_days = 2555  # 7 years
+
+[backup]
+enabled = true
+snapshot_interval = 21600  # Every 6 hours
+retention_days = 365  # 1 year
+backup_path = "/var/lib/rs3gw/backups"
+backup_encryption = true
+backup_to_s3 = true
+backup_s3_bucket = "rs3gw-compliance-backups"
+backup_verification = true  # Verify backup integrity
+
+# Access control
+[access_control]
+# Attribute-Based Access Control (ABAC)
+abac_enabled = true
+# IP whitelisting
+ip_whitelist_enabled = true
+ip_whitelist = ["10.0.0.0/8", "172.16.0.0/12"]
+# Time-based access restrictions
+time_based_access = true
+business_hours_only = false  # Allow 24/7 but log after-hours access
+
+# Data residency
+[data_residency]
+enforce_region = true
+allowed_regions = ["us-east-1", "us-west-2"]  # Example
+geo_fencing_enabled = true
+
+# Disaster recovery
+[disaster_recovery]
+enabled = true
+backup_frequency = "hourly"
+offsite_backup_enabled = true
+offsite_backup_location = "s3://dr-backups/"
+rpo_minutes = 60  # Recovery Point Objective: 1 hour
+rto_minutes = 240  # Recovery Time Objective: 4 hours
+
+# Features
+[features]
+wasm_plugins = false  # Disable for security review required
+video_transcoding = false
+graphql = true
+websocket = true
+grpc = true
+
+# Security scanning
+[security]
+malware_scanning_enabled = true  # Future feature
+content_inspection_enabled = true  # Future feature
+data_loss_prevention_enabled = true  # Future feature
+
+# Compliance notes:
+# - All access must be logged with actor, action, resource, timestamp, IP
+# - Data must be encrypted at rest and in transit
+# - Logs must be immutable and retained for required period
+# - Access controls must be enforced and auditable
+# - Data residency requirements must be met
+# - Backup and recovery procedures must be tested regularly
+# - Incident response procedures must be documented
+# - Regular compliance audits and reports required

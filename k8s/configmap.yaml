@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rs3gw-config
+  namespace: rs3gw
+  labels:
+    app.kubernetes.io/name: rs3gw
+data:
+  RS3GW_BIND_ADDR: "0.0.0.0:9000"
+  RS3GW_STORAGE_ROOT: "/data"
+  RS3GW_DEFAULT_BUCKET: "default"
+  RS3GW_COMPRESSION: "zstd:3"
+  RS3GW_REQUEST_TIMEOUT: "300"
+  RS3GW_MAX_CONCURRENT: "0"
+  RUST_LOG: "info"

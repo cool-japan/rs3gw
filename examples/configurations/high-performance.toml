@@ -1,0 +1,146 @@
+# rs3gw High Performance Configuration
+# Optimized for maximum throughput and low latency
+# Assumes high-end hardware (NVMe SSD, 10Gbps+ network, 64+ cores)
+
+[server]
+bind_addr = "0.0.0.0:9000"
+request_timeout = 60  # Shorter timeout for high-throughput
+max_concurrent = 10000  # Very high concurrency
+
+[tls]
+enabled = true
+cert_path = "/etc/rs3gw/certs/server.crt"
+key_path = "/etc/rs3gw/certs/server.key"
+
+[storage]
+root = "/mnt/nvme/rs3gw/data"  # NVMe for performance
+default_bucket = "default"
+compression = "lz4"  # Fastest compression
+
+[auth]
+access_key = "${RS3GW_ACCESS_KEY}"
+secret_key = "${RS3GW_SECRET_KEY}"
+
+[cache]
+enabled = true
+max_size_mb = 16384  # 16GB cache
+max_objects = 1000000
+ttl = 1800  # 30 minutes
+
+[dedup]
+enabled = false  # Disable for maximum write performance
+# Note: Enable only if storage space is critical
+
+[zerocopy]
+direct_io = true  # Maximum I/O performance
+direct_io_threshold = 4096  # 4KB (aggressive)
+splice = true  # Kernel-level zero-copy
+mmap = true
+
+# io_uring support (Linux only, requires kernel 5.11+)
+io_uring_enabled = true
+io_uring_queue_depth = 4096
+
+[throttle]
+enabled = false  # No throttling for max performance
+# Enable only if network bandwidth is limited
+
+[quota]
+enabled = false  # No quotas for max performance
+
+[logging]
+level = "warn"  # Minimal logging for performance
+format = "json"
+destination = "file"
+file_path = "/var/log/rs3gw/rs3gw.log"
+rotation_size_mb = 500
+rotation_count = 5
+async_logging = true  # Non-blocking logging
+
+[metrics]
+enabled = true
+prometheus_port = 9090
+# Use push gateway for reduced overhead
+push_gateway = "http://pushgateway:9091"
+push_interval = 60
+
+[observability]
+profiling_enabled = false  # Disable for max performance
+anomaly_detection_enabled = false  # Disable overhead
+distributed_tracing_enabled = false  # Disable in high-perf mode
+
+[audit]
+enabled = false  # Disable for maximum performance
+# Enable only if compliance requires it
+
+[self_healing]
+enabled = false  # Disable background tasks for performance
+# Run integrity checks during maintenance windows instead
+
+[cluster]
+enabled = false  # Single node for simplicity
+# For multi-node, use async replication mode
+
+# Performance tuning
+[performance]
+# Thread pool configuration
+min_threads = 64  # Match CPU cores
+max_threads = 256  # 4x CPU cores
+worker_threads = 0  # Auto-detect (use all cores)
+
+# Buffer sizes
+read_buffer_size = 1048576  # 1MB
+write_buffer_size = 1048576  # 1MB
+stream_buffer_size = 524288  # 512KB
+
+# Connection pool
+pool_max_idle = 1000
+pool_idle_timeout = 30
+pool_max_per_host = 100
+
+# TCP tuning
+tcp_nodelay = true
+tcp_keepalive = true
+tcp_keepalive_interval = 30
+
+# Batch operations
+batch_size = 1000
+batch_timeout = 100  # 100ms
+
+[backup]
+enabled = false  # Manual backups during maintenance windows
+
+# Features
+[features]
+wasm_plugins = false  # Disable for performance
+video_transcoding = false
+graphql = false  # Disable non-essential APIs
+websocket = false
+grpc = true  # Keep gRPC for performance
+
+# Specialized optimizations
+[optimizations]
+# Memory allocator: Use jemalloc for better performance
+allocator = "jemalloc"
+
+# Prefetching
+prefetch_enabled = true
+prefetch_window = 10
+
+# Read-ahead
+readahead_size = 2097152  # 2MB
+
+# Write coalescing
+write_coalesce_enabled = true
+write_coalesce_window = 100  # 100ms
+
+# Metadata caching
+metadata_cache_size = 1000000  # 1M entries
+metadata_cache_ttl = 3600  # 1 hour
+
+# Notes:
+# - Benchmark your specific workload and hardware
+# - Monitor CPU, memory, I/O, and network utilization
+# - Adjust concurrency based on available resources
+# - Consider enabling features based on actual usage patterns
+# - Run load tests before production deployment

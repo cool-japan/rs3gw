@@ -1,0 +1,125 @@
+# rs3gw Configuration File Example
+# Copy this file to rs3gw.toml and modify as needed
+# Environment variables override file settings
+
+# Server binding address (default: "0.0.0.0:9000")
+bind_addr = "0.0.0.0:9000"
+
+# Root directory for object storage (default: "./data")
+storage_root = "./data"
+
+# Default bucket name for single-bucket mode (default: "default")
+default_bucket = "default"
+
+# Access credentials (empty = no authentication)
+access_key = ""
+secret_key = ""
+
+# Request timeout in seconds (0 = no timeout, default: 300)
+request_timeout_secs = 300
+
+# Maximum concurrent requests (0 = no limit, default: 0)
+max_concurrent_requests = 0
+
+# Compression mode: "none", "zstd", "lz4", or "zstd:LEVEL" where LEVEL is 1-22
+# Default: "none"
+compression = "none"
+# Examples:
+# compression = "zstd"        # Zstd level 3 (default)
+# compression = "zstd:10"     # Zstd level 10 (higher compression)
+# compression = "lz4"         # Fast LZ4 compression
+
+[tls]
+# TLS certificate and key paths (PEM format)
+# Leave empty to disable TLS
+cert_path = ""  # e.g., "/path/to/cert.pem"
+key_path = ""   # e.g., "/path/to/key.pem"
+
+[connection_pool]
+# HTTP client connection pool configuration
+pool_max_idle_per_host = 32     # Maximum idle connections per host
+pool_idle_timeout_secs = 90     # Idle connection timeout
+connect_timeout_secs = 30       # Connection timeout
+request_timeout_secs = 300      # Request timeout
+
+[cluster]
+# Cluster mode configuration
+enabled = false                  # Enable cluster mode
+# node_id = "node-1"            # Unique node identifier (auto-generated if omitted)
+advertise_addr = "127.0.0.1:9001"  # Address for cluster communication
+cluster_port = 9001              # Port for cluster gossip/replication
+seed_nodes = []                  # Comma-separated seed node addresses
+# seed_nodes = ["node1:9001", "node2:9001"]
+
+[cluster.default_replication]
+# Default replication configuration
+mode = "async"                   # Replication mode: "sync", "async", or "quorum"
+replication_factor = 2          # Number of replicas (including primary)
+
+[dedup]
+# Data deduplication configuration
+enabled = true                   # Enable deduplication
+block_size = 65536              # Block size for dedup (4096-1048576 bytes, default: 64KB)
+algorithm = "fixed-size"        # Chunking algorithm: "fixed-size" or "content-defined"
+min_size = 131072               # Minimum object size for dedup (default: 128KB)
+
+[zerocopy]
+# Zero-copy optimization configuration
+direct_io = true                # Enable direct I/O for large objects (Linux)
+direct_io_threshold = 1048576   # Minimum size for direct I/O (default: 1MB)
+splice = true                   # Enable splice/sendfile for zero-copy (Linux)
+mmap = true                     # Enable memory-mapped metadata files
+
+# Example: Development Configuration
+# ==================================
+# bind_addr = "127.0.0.1:9000"
+# storage_root = "./dev-data"
+# default_bucket = "dev"
+# compression = "zstd:3"
+#
+# [tls]
+# cert_path = ""
+# key_path = ""
+#
+# [cluster]
+# enabled = false
+#
+# [dedup]
+# enabled = false  # Disable for development
+
+# Example: Production Configuration
+# ==================================
+# bind_addr = "0.0.0.0:9000"
+# storage_root = "/var/lib/rs3gw"
+# default_bucket = "production"
+# access_key = "AKIAIOSFODNN7EXAMPLE"
+# secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+# request_timeout_secs = 600
+# max_concurrent_requests = 1000
+# compression = "zstd:6"
+#
+# [tls]
+# cert_path = "/etc/rs3gw/tls/cert.pem"
+# key_path = "/etc/rs3gw/tls/key.pem"
+#
+# [cluster]
+# enabled = true
+# advertise_addr = "10.0.1.10:9001"
+# cluster_port = 9001
+# seed_nodes = ["10.0.1.11:9001", "10.0.1.12:9001"]
+#
+# [cluster.default_replication]
+# mode = "quorum"
+# replication_factor = 3
+#
+# [dedup]
+# enabled = true
+# block_size = 65536
+# algorithm = "content-defined"
+# min_size = 262144  # 256KB
+#
+# [zerocopy]
+# direct_io = true
+# direct_io_threshold = 2097152  # 2MB
+# splice = true
+# mmap = true

@@ -1,0 +1,427 @@
+[workspace]
+members = [
+    ".",
+    "examples/wasm-plugins/rust-uppercase",
+    "examples/wasm-plugins/uppercase-rust",
+    "examples/wasm-plugins/rust-json-filter",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["rs3gw contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cool-japan/rs3gw"
+
+[workspace.dependencies]
+# Core async runtime
+tokio = { version = "1.49", features = ["full"] }
+tokio-stream = "0.1"
+
+# Web framework
+axum = { version = "0.8.8", features = ["multipart", "ws"] }
+tower = { version = "0.5.2", features = ["limit"] }
+tower-http = { version = "0.6.8", features = ["cors", "trace", "request-id", "util", "timeout"] }
+
+# Serialization
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.148"
+serde_yaml = "0.9"
+quick-xml = { version = "0.38.4", features = ["serialize"] }
+toml = "0.9.10"
+
+# Error handling
+thiserror = "2.0.17"
+
+# Logging and tracing
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+
+# OpenTelemetry distributed tracing
+opentelemetry = { version = "0.31", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "metrics"] }
+opentelemetry-otlp = { version = "0.31", features = ["trace", "metrics", "grpc-tonic"] }
+opentelemetry-semantic-conventions = "0.31"
+tracing-opentelemetry = "0.32"
+
+# Utilities
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+bytes = "1.11"
+futures = "0.3"
+percent-encoding = "2.3"
+regex = "1.12"
+base64 = "0.22"
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+tokio-util = { version = "0.7", features = ["io"] }
+http-body-util = "0.1"
+num_cpus = "1.17"
+hostname = "0.4"
+
+# Encryption
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+md5 = "0.8"
+getrandom = "0.3"
+
+# Checksums
+crc32c = "0.6"
+crc32fast = "1.5"
+sha1 = "0.10"
+
+# HTTP client for webhooks
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+url = "2.5"
+
+# Compression
+zstd = "0.13"
+lz4_flex = "0.12"
+flate2 = "1.1"
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
+
+# SciRS2 Ecosystem (SCIRS2 POLICY)
+scirs2-core = "0.1"
+scirs2-io = "0.1"
+
+# Parquet support for S3 Select
+parquet = "57.1"
+arrow = "57.1"
+
+# Apache Avro support for S3 Select
+apache-avro = "0.21"
+
+# Apache ORC support for S3 Select
+orc-rust = "0.7"
+
+# Protocol Buffers support for S3 Select
+prost-reflect = "0.16"
+
+# MessagePack support for S3 Select
+rmp-serde = "1.3"
+
+# Image processing
+image = "0.25.9"
+
+# Video transcoding (feature-gated due to C dependencies)
+ffmpeg-next = "8.0"
+
+# WASM runtime (pure Rust)
+wasmtime = "40.0"
+
+# Parallel processing
+rayon = "1.11"
+
+# Async traits
+async-trait = "0.1"
+async-stream = "0.3"
+
+# Time parsing for config
+humantime = "2.3"
+
+# CLI and error handling
+clap = { version = "4.5.54", features = ["derive"] }
+anyhow = "1.0"
+indicatif = "0.18"
+
+# Directory walking
+walkdir = "2.5"
+
+# Memory mapping
+memmap2 = "0.9"
+
+# TLS support
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rustls-pemfile = "2.2"
+
+# gRPC support
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+
+# GraphQL support
+async-graphql = "7.1.0"
+async-graphql-axum = "7.1.0"
+
+# OpenAPI/Swagger support
+utoipa = { version = "5.4", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
+
+# AWS SDK for S3-compatible backends (MinIO, AWS S3)
+aws-sdk-s3 = "1.118"
+aws-config = "1.8.12"
+
+# Google Cloud Storage SDK
+google-cloud-storage = "1.5"
+google-cloud-auth = "1.3"
+
+# Azure Storage SDK
+azure_storage = "0.21"
+azure_storage_blobs = "0.21"
+azure_core = "0.30"
+
+# Linux-specific dependencies
+libc = "0.2"
+tokio-uring = "0.5.0"
+
+# Testing
+tokio-test = "0.4"
+tempfile = "3.24"
+tokio-tungstenite = "0.28"
+
+# Benchmarking
+criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
+
+# Build dependencies
+tonic-prost-build = "0.14"
+
+# WASM dependencies
+wee_alloc = "0.4"
+
+[package]
+name = "rs3gw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "High-Performance AI/HPC Object Storage Gateway powered by scirs2-io"
+license.workspace = true
+repository.workspace = true
+keywords = ["s3", "storage", "gateway", "hpc", "ai"]
+categories = ["web-programming::http-server", "filesystem"]
+
+[features]
+default = []
+io_uring = ["dep:tokio-uring"]
+video-transcoding = ["dep:ffmpeg-next"]
+wasm-plugins = ["dep:wasmtime"]
+
+[dependencies]
+# Core async runtime
+tokio.workspace = true
+tokio-stream.workspace = true
+
+# Web framework
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+quick-xml.workspace = true
+toml.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging and tracing
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# OpenTelemetry distributed tracing
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry-semantic-conventions.workspace = true
+tracing-opentelemetry.workspace = true
+
+# Utilities
+uuid.workspace = true
+chrono.workspace = true
+bytes.workspace = true
+futures.workspace = true
+percent-encoding.workspace = true
+regex.workspace = true
+base64.workspace = true
+hex.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+tokio-util.workspace = true
+http-body-util.workspace = true
+num_cpus.workspace = true
+hostname.workspace = true
+
+# Encryption
+aes-gcm.workspace = true
+chacha20poly1305.workspace = true
+md5.workspace = true
+getrandom.workspace = true
+
+# Checksums
+crc32c.workspace = true
+crc32fast.workspace = true
+sha1.workspace = true
+
+# HTTP client for webhooks
+reqwest.workspace = true
+url.workspace = true
+
+# Compression
+zstd.workspace = true
+lz4_flex.workspace = true
+flate2.workspace = true
+
+# Metrics
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+# SciRS2 Ecosystem (SCIRS2 POLICY)
+scirs2-core.workspace = true
+scirs2-io.workspace = true
+
+# Parquet support for S3 Select
+parquet.workspace = true
+arrow.workspace = true
+
+# Apache Avro support for S3 Select
+apache-avro.workspace = true
+
+# Apache ORC support for S3 Select
+orc-rust.workspace = true
+
+# Protocol Buffers support for S3 Select
+prost-reflect.workspace = true
+
+# MessagePack support for S3 Select
+rmp-serde.workspace = true
+
+# Image processing
+image.workspace = true
+
+# Video transcoding (optional, feature-gated due to C dependencies)
+ffmpeg-next = { workspace = true, optional = true }
+
+# WASM runtime (optional, pure Rust)
+wasmtime = { workspace = true, optional = true }
+
+# Parallel processing
+rayon.workspace = true
+
+# Async traits
+async-trait.workspace = true
+async-stream.workspace = true
+
+# Time parsing for config
+humantime.workspace = true
+
+# CLI and error handling
+clap.workspace = true
+anyhow.workspace = true
+indicatif.workspace = true
+
+# Directory walking
+walkdir.workspace = true
+
+# Memory mapping
+memmap2.workspace = true
+
+# TLS support
+axum-server.workspace = true
+rustls-pemfile.workspace = true
+
+# gRPC support
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+# GraphQL support
+async-graphql.workspace = true
+async-graphql-axum.workspace = true
+
+# OpenAPI/Swagger support
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+
+# AWS SDK for S3-compatible backends (MinIO, AWS S3)
+aws-sdk-s3.workspace = true
+aws-config.workspace = true
+
+# Google Cloud Storage SDK
+google-cloud-storage.workspace = true
+google-cloud-auth.workspace = true
+
+# Azure Storage SDK
+azure_storage.workspace = true
+azure_storage_blobs.workspace = true
+azure_core.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Unix-specific dependencies
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# io_uring support (Linux only, optional)
+tokio-uring = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Testing
+tokio-test.workspace = true
+tempfile.workspace = true
+aws-sdk-s3.workspace = true
+aws-config.workspace = true
+reqwest = { workspace = true, features = ["json", "multipart"] }
+tokio-tungstenite.workspace = true
+
+# Benchmarking
+criterion.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = false
+
+[[bench]]
+name = "storage_benchmarks"
+harness = false
+
+[[bench]]
+name = "compression_benchmarks"
+harness = false
+
+[[bench]]
+name = "api_benchmarks"
+harness = false
+
+[[bench]]
+name = "load_testing_benchmarks"
+harness = false
+
+[[bench]]
+name = "s3_api_benchmarks"
+harness = false
+
+[[bench]]
+name = "grpc_vs_rest_benchmarks"
+harness = false
+
+[[bin]]
+name = "testdata-generator"
+path = "src/bin/testdata_generator.rs"
+
+[[bin]]
+name = "s3-migrate"
+path = "src/bin/s3_migrate.rs"
+
+[[bin]]
+name = "rs3ctl"
+path = "src/bin/rs3ctl.rs"

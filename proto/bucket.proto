@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package rs3gw.bucket;
+
+import "google/protobuf/timestamp.proto";
+
+// ============================================================================
+// Bucket Messages
+// ============================================================================
+
+message Bucket {
+  string name = 1;
+  google.protobuf.Timestamp creation_date = 2;
+  string region = 3;
+}
+
+message BucketMetadata {
+  string name = 1;
+  google.protobuf.Timestamp creation_date = 2;
+  string region = 3;
+  map<string, string> tags = 4;
+  optional string policy = 5;
+  bool versioning_enabled = 6;
+}
+
+// ============================================================================
+// Request/Response Messages
+// ============================================================================
+
+message ListBucketsRequest {
+  optional int32 max_buckets = 1;
+  optional string continuation_token = 2;
+}
+
+message ListBucketsResponse {
+  repeated Bucket buckets = 1;
+  bool is_truncated = 2;
+  optional string next_continuation_token = 3;
+}
+
+message CreateBucketRequest {
+  string bucket = 1;
+  optional string region = 2;
+  map<string, string> tags = 3;
+}
+
+message CreateBucketResponse {
+  string location = 1;
+}
+
+message DeleteBucketRequest {
+  string bucket = 1;
+}
+
+message HeadBucketRequest {
+  string bucket = 1;
+}
+
+message HeadBucketResponse {
+  bool exists = 1;
+  optional string region = 2;
+  optional google.protobuf.Timestamp creation_date = 3;
+}
+
+message GetBucketLocationRequest {
+  string bucket = 1;
+}
+
+message GetBucketLocationResponse {
+  string location = 1;
+}
+
+message GetBucketMetadataRequest {
+  string bucket = 1;
+}
+
+message GetBucketMetadataResponse {
+  BucketMetadata metadata = 1;
+}
+
+message PutBucketTaggingRequest {
+  string bucket = 1;
+  map<string, string> tags = 2;
+}
+
+message GetBucketTaggingRequest {
+  string bucket = 1;
+}
+
+message GetBucketTaggingResponse {
+  map<string, string> tags = 1;
+}
+
+message DeleteBucketTaggingRequest {
+  string bucket = 1;
+}
+
+message PutBucketPolicyRequest {
+  string bucket = 1;
+  string policy = 2;
+}
+
+message GetBucketPolicyRequest {
+  string bucket = 1;
+}
+
+message GetBucketPolicyResponse {
+  string policy = 1;
+}
+
+message DeleteBucketPolicyRequest {
+  string bucket = 1;
+}
+
+message PutBucketVersioningRequest {
+  string bucket = 1;
+  bool enabled = 2;
+}
+
+message GetBucketVersioningRequest {
+  string bucket = 1;
+}
+
+message GetBucketVersioningResponse {
+  bool enabled = 1;
+}

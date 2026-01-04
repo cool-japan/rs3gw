@@ -1,0 +1,32 @@
+{
+  "id": "nlp-text-preprocessing",
+  "name": "NLP Text Preprocessing",
+  "version": "1.0.0",
+  "description": "Text preprocessing pipeline for NLP tasks (sentiment analysis, classification, etc.)",
+  "steps": [
+    {
+      "id": "tokenize",
+      "step_type": "text_tokenization",
+      "config": {
+        "tokenizer_type": "wordpiece",
+        "vocab_file": null,
+        "max_length": 512,
+        "truncation": true,
+        "padding": "max_length",
+        "lowercase": true,
+        "remove_special_chars": false
+      },
+      "cache_results": true,
+      "description": "Tokenize text using WordPiece tokenization for BERT-like models"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "nlp-team",
+    "target_model": "BERT/RoBERTa/DistilBERT",
+    "dataset": "Text Classification Dataset",
+    "use_case": "Text classification and sentiment analysis",
+    "recommended_batch_size": 32,
+    "notes": "Compatible with HuggingFace transformers tokenization"
+  }
+}

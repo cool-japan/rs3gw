@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rs3gw.fullname" . }}-config
+  labels:
+    {{- include "rs3gw.labels" . | nindent 4 }}
+data:
+  RS3GW_BIND_ADDR: {{ .Values.config.bindAddr | quote }}
+  RS3GW_STORAGE_ROOT: "/data"
+  RS3GW_DEFAULT_BUCKET: {{ .Values.config.defaultBucket | quote }}
+  RS3GW_COMPRESSION: {{ .Values.config.compression | quote }}
+  RS3GW_REQUEST_TIMEOUT: {{ .Values.config.requestTimeout | quote }}
+  RS3GW_MAX_CONCURRENT: {{ .Values.config.maxConcurrent | quote }}
+  RUST_LOG: {{ .Values.config.logLevel | quote }}
+  {{- if .Values.tls.enabled }}
+  RS3GW_TLS_CERT: "/tls/tls.crt"
+  RS3GW_TLS_KEY: "/tls/tls.key"
+  {{- end }}

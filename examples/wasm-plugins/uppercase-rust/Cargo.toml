@@ -1,0 +1,10 @@
+[package]
+name = "uppercase-wasm-plugin"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# No dependencies needed for this simple plugin

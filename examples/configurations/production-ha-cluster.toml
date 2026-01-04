@@ -1,0 +1,140 @@
+# rs3gw Production Configuration - High Availability Cluster
+# For multi-node production deployments with replication
+
+[server]
+bind_addr = "0.0.0.0:9000"
+request_timeout = 300
+max_concurrent = 2000  # Higher for distributed load
+
+[tls]
+enabled = true
+cert_path = "/etc/rs3gw/certs/server.crt"
+key_path = "/etc/rs3gw/certs/server.key"
+
+[storage]
+root = "/var/lib/rs3gw/data"
+default_bucket = "default"
+compression = "zstd:5"  # Higher compression for network efficiency
+
+[auth]
+access_key = "${RS3GW_ACCESS_KEY}"
+secret_key = "${RS3GW_SECRET_KEY}"
+
+[cache]
+enabled = true
+max_size_mb = 4096  # 4GB cache per node
+max_objects = 200000
+ttl = 300  # 5 minutes (shorter for cluster consistency)
+
+[dedup]
+enabled = true
+block_size = 65536
+algorithm = "content-defined"
+min_size = 131072
+
+[zerocopy]
+direct_io = true
+direct_io_threshold = 1048576
+splice = true
+mmap = true
+
+[throttle]
+enabled = true
+rps = 20000  # Higher throughput in cluster
+upload_mbps = 2000  # 2 Gbps
+download_mbps = 2000  # 2 Gbps
+
+[quota]
+enabled = true
+max_storage_gb = 5000  # 5TB per bucket
+max_objects = 10000000  # 10M objects per bucket
+
+[cluster]
+enabled = true
+node_id = "${RS3GW_NODE_ID}"  # Unique per node: node-1, node-2, etc.
+advertise_addr = "${RS3GW_ADVERTISE_ADDR}"  # e.g., 10.0.1.10:9001
+port = 9001
+seed_nodes = ["node-1.rs3gw.local:9001", "node-2.rs3gw.local:9001", "node-3.rs3gw.local:9001"]
+
+[replication]
+mode = "quorum"  # Balance between consistency and availability
+factor = 3  # 3 replicas (primary + 2 copies)
+sync_timeout = 5000  # 5 seconds
+retry_attempts = 3
+retry_backoff = 1000  # 1 second
+
+[logging]
+level = "info"
+format = "json"
+destination = "file"
+file_path = "/var/log/rs3gw/rs3gw.log"
+rotation_size_mb = 200
+rotation_count = 20
+
+[metrics]
+enabled = true
+prometheus_port = 9090
+
+[observability]
+profiling_enabled = true
+profiling_interval = 300
+profiling_pprof_export = true
+anomaly_detection_enabled = true
+anomaly_threshold_sigma = 3.0
+distributed_tracing_enabled = true
+otlp_endpoint = "http://jaeger:4317"
+trace_sampling_ratio = 0.1  # 10% sampling in production
+
+[audit]
+enabled = true
+log_path = "/var/log/rs3gw/audit.log"
+chain_verification = true
+forwarding_enabled = true
+forwarding_destinations = [
+    "syslog://syslog.internal:514",
+    "s3://audit-logs-bucket/audit/"
+]
+
+[self_healing]
+enabled = true
+check_interval = 1800  # 30 minutes (more frequent in cluster)
+repair_enabled = true
+max_concurrent_repairs = 10  # Higher in cluster
+corruption_threshold = 0.005  # 0.5% (stricter in cluster)
+auto_cleanup_enabled = true
+retention_days = 90
+
+[backup]
+enabled = true
+snapshot_interval = 43200  # Every 12 hours
+retention_days = 30
+backup_path = "/var/lib/rs3gw/backups"
+backup_to_s3 = true
+backup_s3_bucket = "rs3gw-backups"
+
+# Resource management for cluster
+[resource_management]
+adaptive_rate_limiting = true
+initial_rate_limit = 10000
+min_rate_limit = 1000
+max_rate_limit = 50000
+load_shedding_enabled = true
+load_shedding_threshold = 0.90  # 90%
+memory_threshold = 0.85  # 85%
+target_cpu = 0.75  # 75%
+
+# HA features
+[features]
+wasm_plugins = true
+video_transcoding = false
+graphql = true
+websocket = true
+grpc = true
+
+# Health checks for load balancer
+[health_check]
+enabled = true
+interval = 10  # 10 seconds
+timeout = 5  # 5 seconds
+unhealthy_threshold = 3
+healthy_threshold = 2

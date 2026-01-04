@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: rs3gw
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+
+# Optional resources (uncomment as needed)
+# - ingress.yaml
+# - servicemonitor.yaml
+
+commonLabels:
+  app.kubernetes.io/name: rs3gw
+  app.kubernetes.io/version: "0.1.0"
+  app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: rs3gw
+    newName: rs3gw
+    newTag: latest

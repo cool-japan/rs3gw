@@ -1,0 +1,229 @@
+syntax = "proto3";
+
+package rs3gw.object;
+
+import "google/protobuf/timestamp.proto";
+
+// ============================================================================
+// Object Messages
+// ============================================================================
+
+message ObjectMetadata {
+  string key = 1;
+  string bucket = 2;
+  uint64 size = 3;
+  string etag = 4;
+  google.protobuf.Timestamp last_modified = 5;
+  string content_type = 6;
+  map<string, string> metadata = 7;
+  optional string version_id = 8;
+  optional string storage_class = 9;
+  optional bytes checksum_crc32c = 10;
+  optional bytes checksum_crc32 = 11;
+  optional bytes checksum_sha256 = 12;
+  optional bytes checksum_sha1 = 13;
+}
+
+message ObjectInfo {
+  string key = 1;
+  uint64 size = 2;
+  string etag = 3;
+  google.protobuf.Timestamp last_modified = 4;
+  string storage_class = 5;
+  optional string version_id = 6;
+  bool is_delete_marker = 7;
+}
+
+// ============================================================================
+// Request/Response Messages
+// ============================================================================
+
+message ListObjectsRequest {
+  string bucket = 1;
+  optional string prefix = 2;
+  optional string delimiter = 3;
+  optional int32 max_keys = 4;
+  optional string continuation_token = 5;
+  optional string start_after = 6;
+  bool fetch_owner = 7;
+}
+
+message ListObjectsResponse {
+  string bucket = 1;
+  repeated ObjectInfo objects = 2;
+  repeated string common_prefixes = 3;
+  bool is_truncated = 4;
+  optional string next_continuation_token = 5;
+  optional string delimiter = 6;
+  optional string prefix = 7;
+  int32 max_keys = 8;
+  int32 key_count = 9;
+}
+
+message GetObjectRequest {
+  string bucket = 1;
+  string key = 2;
+  optional string version_id = 3;
+  optional int64 range_start = 4;
+  optional int64 range_end = 5;
+  optional string if_match = 6;
+  optional string if_none_match = 7;
+  optional google.protobuf.Timestamp if_modified_since = 8;
+  optional google.protobuf.Timestamp if_unmodified_since = 9;
+}
+
+message GetObjectResponse {
+  ObjectMetadata metadata = 1;
+  bytes data = 2;
+  optional int64 content_range_start = 3;
+  optional int64 content_range_end = 4;
+  optional int64 content_range_total = 5;
+}
+
+message PutObjectRequest {
+  string bucket = 1;
+  string key = 2;
+  bytes data = 3;
+  optional string content_type = 4;
+  map<string, string> metadata = 5;
+  optional string storage_class = 6;
+  optional bytes checksum_crc32c = 7;
+  optional bytes checksum_crc32 = 8;
+  optional bytes checksum_sha256 = 9;
+  optional bytes checksum_sha1 = 10;
+}
+
+message PutObjectResponse {
+  string etag = 1;
+  optional string version_id = 2;
+}
+
+message PutObjectStreamRequest {
+  oneof request {
+    PutObjectMetadata metadata = 1;
+    bytes chunk = 2;
+  }
+}
+
+message PutObjectMetadata {
+  string bucket = 1;
+  string key = 2;
+  optional string content_type = 3;
+  map<string, string> metadata = 4;
+  optional string storage_class = 5;
+}
+
+message DeleteObjectRequest {
+  string bucket = 1;
+  string key = 2;
+  optional string version_id = 3;
+}
+
+message DeleteObjectResponse {
+  bool deleted = 1;
+  optional string version_id = 2;
+  bool delete_marker = 3;
+}
+
+message DeleteObjectsRequest {
+  string bucket = 1;
+  repeated string keys = 2;
+  bool quiet = 3;
+}
+
+message DeletedObject {
+  string key = 1;
+  optional string version_id = 2;
+  bool delete_marker = 3;
+}
+
+message DeleteError {
+  string key = 1;
+  string code = 2;
+  string message = 3;
+}
+
+message DeleteObjectsResponse {
+  repeated DeletedObject deleted = 1;
+  repeated DeleteError errors = 2;
+}
+
+message HeadObjectRequest {
+  string bucket = 1;
+  string key = 2;
+  optional string version_id = 3;
+  optional string if_match = 4;
+  optional string if_none_match = 5;
+  optional google.protobuf.Timestamp if_modified_since = 6;
+  optional google.protobuf.Timestamp if_unmodified_since = 7;
+}
+
+message HeadObjectResponse {
+  ObjectMetadata metadata = 1;
+}
+
+message CopyObjectRequest {
+  string source_bucket = 1;
+  string source_key = 2;
+  optional string source_version_id = 3;
+  string dest_bucket = 4;
+  string dest_key = 5;
+  optional string metadata_directive = 6;
+  map<string, string> metadata = 7;
+  optional string if_match = 8;
+  optional string if_none_match = 9;
+  optional google.protobuf.Timestamp if_modified_since = 10;
+  optional google.protobuf.Timestamp if_unmodified_since = 11;
+  optional string storage_class = 12;
+}
+
+message CopyObjectResponse {
+  string etag = 1;
+  google.protobuf.Timestamp last_modified = 2;
+  optional string version_id = 3;
+}
+
+message GetObjectAttributesRequest {
+  string bucket = 1;
+  string key = 2;
+  optional string version_id = 3;
+}
+
+message GetObjectAttributesResponse {
+  string etag = 1;
+  uint64 size = 2;
+  string storage_class = 3;
+  google.protobuf.Timestamp last_modified = 4;
+  optional bytes checksum_crc32c = 5;
+  optional bytes checksum_crc32 = 6;
+  optional bytes checksum_sha256 = 7;
+  optional bytes checksum_sha1 = 8;
+}
+
+message PutObjectTaggingRequest {
+  string bucket = 1;
+  string key = 2;
+  optional string version_id = 3;
+  map<string, string> tags = 4;
+}
+
+message GetObjectTaggingRequest {
+  string bucket = 1;
+  string key = 2;
+  optional string version_id = 3;
+}
+
+message GetObjectTaggingResponse {
+  map<string, string> tags = 1;
+  optional string version_id = 2;
+}
+
+message DeleteObjectTaggingRequest {
+  string bucket = 1;
+  string key = 2;
+  optional string version_id = 3;
+}
+
+message DeleteObjectTaggingResponse {
+  optional string version_id = 1;
+}

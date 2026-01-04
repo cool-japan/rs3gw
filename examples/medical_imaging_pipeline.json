@@ -1,0 +1,41 @@
+{
+  "id": "medical-imaging-preprocessing",
+  "name": "Medical Imaging Preprocessing",
+  "version": "1.0.0",
+  "description": "Preprocessing pipeline for medical imaging (CT/MRI scans) for diagnostic AI models",
+  "steps": [
+    {
+      "id": "resize",
+      "step_type": "image_resize",
+      "config": {
+        "width": 512,
+        "height": 512,
+        "mode": "fit",
+        "filter": "lanczos3"
+      },
+      "cache_results": true,
+      "description": "Resize medical images to 512x512 while preserving aspect ratio"
+    },
+    {
+      "id": "normalize",
+      "step_type": "image_normalization",
+      "config": {
+        "mean": [0.5],
+        "std": [0.5],
+        "normalize_range": true
+      },
+      "cache_results": true,
+      "description": "Normalize grayscale medical images to [-1, 1] range for model input"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "medical-ai-team",
+    "target_model": "Medical Diagnostic CNN",
+    "dataset": "Medical Imaging Dataset",
+    "compliance": "HIPAA-compliant pipeline",
+    "use_case": "Diagnostic AI inference",
+    "recommended_batch_size": 16,
+    "notes": "Optimized for grayscale medical imaging (CT, X-Ray, MRI)"
+  }
+}

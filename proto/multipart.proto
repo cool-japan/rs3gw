@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package rs3gw.multipart;
+
+import "google/protobuf/timestamp.proto";
+
+// ============================================================================
+// Multipart Upload Messages
+// ============================================================================
+
+message MultipartUpload {
+  string upload_id = 1;
+  string key = 2;
+  google.protobuf.Timestamp initiated = 3;
+  optional string storage_class = 4;
+}
+
+message Part {
+  int32 part_number = 1;
+  string etag = 2;
+  uint64 size = 3;
+  google.protobuf.Timestamp last_modified = 4;
+}
+
+message CompletedPart {
+  int32 part_number = 1;
+  string etag = 2;
+}
+
+// ============================================================================
+// Request/Response Messages
+// ============================================================================
+
+message CreateMultipartUploadRequest {
+  string bucket = 1;
+  string key = 2;
+  optional string content_type = 3;
+  map<string, string> metadata = 4;
+  optional string storage_class = 5;
+}
+
+message CreateMultipartUploadResponse {
+  string upload_id = 1;
+  string bucket = 2;
+  string key = 3;
+}
+
+message UploadPartRequest {
+  string bucket = 1;
+  string key = 2;
+  string upload_id = 3;
+  int32 part_number = 4;
+  bytes data = 5;
+  optional bytes checksum_crc32c = 6;
+  optional bytes checksum_crc32 = 7;
+  optional bytes checksum_sha256 = 8;
+  optional bytes checksum_sha1 = 9;
+}
+
+message UploadPartResponse {
+  string etag = 1;
+}
+
+message UploadPartStreamRequest {
+  oneof request {
+    UploadPartMetadata metadata = 1;
+    bytes chunk = 2;
+  }
+}
+
+message UploadPartMetadata {
+  string bucket = 1;
+  string key = 2;
+  string upload_id = 3;
+  int32 part_number = 4;
+}
+
+message UploadPartCopyRequest {
+  string source_bucket = 1;
+  string source_key = 2;
+  optional string source_version_id = 3;
+  string dest_bucket = 4;
+  string dest_key = 5;
+  string upload_id = 6;
+  int32 part_number = 7;
+  optional int64 copy_source_range_start = 8;
+  optional int64 copy_source_range_end = 9;
+  optional string if_match = 10;
+  optional string if_none_match = 11;
+  optional google.protobuf.Timestamp if_modified_since = 12;
+  optional google.protobuf.Timestamp if_unmodified_since = 13;
+}
+
+message UploadPartCopyResponse {
+  string etag = 1;
+  google.protobuf.Timestamp last_modified = 2;
+}
+
+message CompleteMultipartUploadRequest {
+  string bucket = 1;
+  string key = 2;
+  string upload_id = 3;
+  repeated CompletedPart parts = 4;
+}
+
+message CompleteMultipartUploadResponse {
+  string location = 1;
+  string bucket = 2;
+  string key = 3;
+  string etag = 4;
+  optional string version_id = 5;
+}
+
+message AbortMultipartUploadRequest {
+  string bucket = 1;
+  string key = 2;
+  string upload_id = 3;
+}
+
+message ListPartsRequest {
+  string bucket = 1;
+  string key = 2;
+  string upload_id = 3;
+  optional int32 max_parts = 4;
+  optional int32 part_number_marker = 5;
+}
+
+message ListPartsResponse {
+  string bucket = 1;
+  string key = 2;
+  string upload_id = 3;
+  repeated Part parts = 4;
+  bool is_truncated = 5;
+  optional int32 next_part_number_marker = 6;
+  int32 max_parts = 7;
+  google.protobuf.Timestamp initiated = 8;
+  optional string storage_class = 9;
+}
+
+message ListMultipartUploadsRequest {
+  string bucket = 1;
+  optional string prefix = 2;
+  optional string delimiter = 3;
+  optional int32 max_uploads = 4;
+  optional string key_marker = 5;
+  optional string upload_id_marker = 6;
+}
+
+message ListMultipartUploadsResponse {
+  string bucket = 1;
+  repeated MultipartUpload uploads = 2;
+  repeated string common_prefixes = 3;
+  bool is_truncated = 4;
+  optional string next_key_marker = 5;
+  optional string next_upload_id_marker = 6;
+  optional string delimiter = 7;
+  optional string prefix = 8;
+  int32 max_uploads = 9;
+}

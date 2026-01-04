@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: rs3gw
+  namespace: rs3gw
+  labels:
+    app.kubernetes.io/name: rs3gw
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: rs3gw
+---
+# Optional: NodePort service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: rs3gw-nodeport
+  namespace: rs3gw
+  labels:
+    app.kubernetes.io/name: rs3gw
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http
+      nodePort: 30900
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: rs3gw

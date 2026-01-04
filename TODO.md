@@ -1,0 +1,997 @@
+## v0.1.0 Initial Release (First Release)
+
+### Scope
+- S3-compatible REST API (core bucket/object/multipart operations)
+- Local filesystem backend as the default storage
+- Optional AWS Signature V4 authentication
+- Operational basics: metrics, health, timeouts, graceful shutdown
+- Developer-facing: tests, examples, Docker/dev compose
+
+### Reference
+- Main README: README.md
+- Config template: rs3gw.toml.example
+- Production guide: docs/production_deployment.md
+- Performance tuning: docs/performance_tuning.md
+- WebSocket: docs/websocket.md
+- Transformations: docs/transformations.md
+- WASM plugins: docs/wasm_plugins.md
+
+### Release checklist
+- [ ] Builds cleanly in release mode (`cargo build --release`)
+- [ ] Runs locally with default configuration
+- [ ] Docker image builds successfully
+- [ ] docker-compose.dev.yml starts end-to-end stack
+- [ ] S3 basic smoke test with aws-cli (mb/ls/cp/rm/rb)
+- [ ] Multipart upload smoke test (aws-cli)
+- [ ] Metrics endpoint reachable (/metrics)
+- [ ] Health endpoint reachable (/health)
+- [ ] Integration tests pass
+- [ ] Documented note for known stubs/NotImplemented endpoints
+
+## Module map
+
+- API: src/api/README.md
+- Storage: src/storage/README.md
+- Auth: src/auth/README.md
+- gRPC: src/grpc/README.md
+- Cluster: src/cluster/README.md
+- Observability: src/observability/README.md
+
+## Configuration (confirmed keys)
+
+### TOML (rs3gw.toml.example)
+- bind_addr
+- storage_root
+- default_bucket
+- access_key
+- secret_key
+- request_timeout_secs
+- max_concurrent_requests
+- compression
+- [tls] cert_path
+- [tls] key_path
+- [connection_pool] pool_max_idle_per_host
+- [connection_pool] pool_idle_timeout_secs
+- [connection_pool] connect_timeout_secs
+- [connection_pool] request_timeout_secs
+- [cluster] enabled
+- [cluster] advertise_addr
+- [cluster] cluster_port
+- [cluster] seed_nodes
+- [cluster.default_replication] mode
+- [cluster.default_replication] replication_factor
+- [dedup] enabled
+- [dedup] block_size
+- [dedup] algorithm
+- [dedup] min_size
+- [zerocopy] direct_io
+- [zerocopy] direct_io_threshold
+- [zerocopy] splice
+- [zerocopy] mmap
+
+### Environment variables (from code/docs)
+- RS3GW_BIND_ADDR
+- RS3GW_STORAGE_ROOT
+- RS3GW_DEFAULT_BUCKET
+- RS3GW_ACCESS_KEY
+- RS3GW_SECRET_KEY
+- RS3GW_COMPRESSION
+- RS3GW_REQUEST_TIMEOUT
+- RS3GW_MAX_CONCURRENT
+- RS3GW_TLS_CERT
+- RS3GW_TLS_KEY
+- RS3GW_POOL_MAX_IDLE
+- RS3GW_POOL_IDLE_TIMEOUT
+- RS3GW_CONNECT_TIMEOUT
+- RS3GW_CLIENT_TIMEOUT
+- RS3GW_CACHE_ENABLED
+- RS3GW_CACHE_MAX_SIZE_MB
+- RS3GW_CACHE_MAX_OBJECTS
+- RS3GW_CACHE_TTL
+- RS3GW_THROTTLE_ENABLED
+- RS3GW_THROTTLE_RPS
+- RS3GW_THROTTLE_UPLOAD_MBPS
+- RS3GW_THROTTLE_DOWNLOAD_MBPS
+- RS3GW_QUOTA_ENABLED
+- RS3GW_QUOTA_MAX_STORAGE_GB
+- RS3GW_QUOTA_MAX_OBJECTS
+- RS3GW_CLUSTER_ENABLED
+- RS3GW_CLUSTER_NODE_ID
+- RS3GW_CLUSTER_ADVERTISE_ADDR
+- RS3GW_CLUSTER_PORT
+- RS3GW_CLUSTER_SEED_NODES
+- RS3GW_REPLICATION_MODE
+- RS3GW_REPLICATION_FACTOR
+- RS3GW_DEDUP_ENABLED
+- RS3GW_DEDUP_BLOCK_SIZE
+- RS3GW_DEDUP_ALGORITHM
+- RS3GW_DEDUP_MIN_SIZE
+- RS3GW_ZEROCOPY_DIRECT_IO
+- RS3GW_ZEROCOPY_DIRECT_IO_THRESHOLD
+- RS3GW_ZEROCOPY_SPLICE
+- RS3GW_ZEROCOPY_MMAP
+- RS3GW_SELECT_CACHE_ENABLED
+- RS3GW_SELECT_CACHE_MAX_ENTRIES
+- RS3GW_SELECT_CACHE_MAX_MEMORY_MB
+- RS3GW_SELECT_CACHE_TTL
+- RS3GW_GRPC_ENABLED
+- RS3GW_GRPC_PORT
+- RS3GW_GRPC_MAX_MESSAGE_SIZE
+- RS3GW_GRPC_TLS_CERT
+- RS3GW_GRPC_TLS_KEY
+- RS3GW_PROFILING_ENABLED
+- RS3GW_PROFILING_INTERVAL
+- RS3GW_PROFILING_MAX_SNAPSHOTS
+- RS3GW_PROFILING_CPU
+- RS3GW_PROFILING_MEMORY
+- RS3GW_PROFILING_IO
+- RS3GW_PROFILING_CPU_RATE
+- RS3GW_PROFILING_MEMORY_RATE
+- RS3GW_PROFILING_MAX_PROFILES
+- RS3GW_PROFILING_OUTPUT_DIR
+- RS3GW_MIN_THREADS
+- RS3GW_MAX_THREADS
+- RS3GW_TARGET_CPU
+- RS3GW_MEMORY_THRESHOLD
+- RS3GW_ADJUSTMENT_INTERVAL
+- RS3GW_ADAPTIVE_RATE_LIMIT
+- RS3GW_INITIAL_RATE_LIMIT
+- RS3GW_MIN_RATE_LIMIT
+- RS3GW_MAX_RATE_LIMIT
+- RS3GW_LOAD_SHEDDING_THRESHOLD
+- ENVIRONMENT
+- OTEL_EXPORTER_OTLP_ENDPOINT
+- OTEL_TRACES_SAMPLER_ARG
+- OTEL_TRACES_EXPORTER
+
+## S3 REST API: compatibility checklist
+
+Legend: [x]=implemented, [ ]=not yet/verify, [~]=compat stub (returns fixed/NotImplemented as needed).
+
+### Bucket operations
+- [x] ListBuckets
+- [x] HeadBucket
+- [x] CreateBucket
+- [x] DeleteBucket
+- [x] GetBucketLocation
+- [x] ListObjectsV2 (bucket listing)
+- [x] GetBucketTagging
+- [x] PutBucketTagging
+- [x] DeleteBucketTagging
+- [x] GetBucketPolicy
+- [x] PutBucketPolicy
+- [x] DeleteBucketPolicy
+- [~] GetBucketAcl
+- [~] PutBucketAcl
+- [~] GetBucketVersioning
+- [~] PutBucketVersioning
+- [~] GetBucketEncryption
+- [~] PutBucketEncryption
+- [~] DeleteBucketEncryption
+- [~] GetBucketLifecycleConfiguration
+- [~] PutBucketLifecycleConfiguration
+- [~] DeleteBucketLifecycleConfiguration
+- [~] GetBucketCors
+- [~] PutBucketCors
+- [~] DeleteBucketCors
+- [~] GetBucketNotificationConfiguration
+- [~] PutBucketNotificationConfiguration
+- [~] GetBucketLogging
+- [~] PutBucketLogging
+- [~] GetBucketRequestPayment
+- [~] PutBucketRequestPayment
+- [~] GetBucketWebsite
+- [~] PutBucketWebsite
+- [~] DeleteBucketWebsite
+- [~] GetBucketReplication
+- [~] PutBucketReplication
+- [~] DeleteBucketReplication
+- [~] GetBucketAccelerateConfiguration
+- [~] PutBucketAccelerateConfiguration
+- [~] GetBucketOwnershipControls
+- [~] PutBucketOwnershipControls
+- [~] DeleteBucketOwnershipControls
+- [~] GetPublicAccessBlock
+- [~] PutPublicAccessBlock
+- [~] DeletePublicAccessBlock
+- [~] GetBucketIntelligentTieringConfiguration
+- [~] PutBucketIntelligentTieringConfiguration
+- [~] DeleteBucketIntelligentTieringConfiguration
+- [~] GetObjectLockConfiguration
+- [~] PutObjectLockConfiguration
+- [~] GetBucketMetricsConfiguration
+- [~] PutBucketMetricsConfiguration
+- [~] DeleteBucketMetricsConfiguration
+- [~] ListBucketMetricsConfigurations
+- [~] GetBucketAnalyticsConfiguration
+- [~] PutBucketAnalyticsConfiguration
+- [~] DeleteBucketAnalyticsConfiguration
+- [~] ListBucketAnalyticsConfigurations
+- [~] GetBucketInventoryConfiguration
+- [~] PutBucketInventoryConfiguration
+- [~] DeleteBucketInventoryConfiguration
+- [~] ListBucketInventoryConfigurations
+
+### Object operations
+- [x] ListObjectsV1
+- [x] ListObjectsV2
+- [x] HeadObject
+- [x] GetObject
+- [x] PutObject
+- [x] DeleteObject
+- [x] DeleteObjects
+- [x] CopyObject
+- [x] GetObjectAttributes
+- [x] PostObject (multipart/form-data)
+- [x] Range requests
+- [x] Conditional headers (If-Match/If-None-Match/etc)
+- [~] GetObjectAcl
+- [~] PutObjectAcl
+- [~] ListObjectVersions
+- [~] RestoreObject
+- [~] GetObjectLegalHold
+- [~] PutObjectLegalHold
+- [~] GetObjectRetention
+- [~] PutObjectRetention
+- [~] SelectObjectContent
+- [~] GetObjectTorrent
+- [~] WriteGetObjectResponse
+
+### Multipart upload
+- [x] CreateMultipartUpload
+- [x] UploadPart
+- [x] UploadPartCopy
+- [x] CompleteMultipartUpload
+- [x] AbortMultipartUpload
+- [x] ListParts
+- [x] ListMultipartUploads
+
+### Protocol correctness / edge cases to verify
+- [ ] XML response formatting matches AWS expectations (root tags, namespaces)
+- [ ] Error codes and HTTP status codes match AWS for common failures
+- [ ] UTF-8 / URL encoding for keys and query parameters
+- [ ] Pagination: marker/continuation-token semantics
+- [ ] MaxKeys handling and truncation flags
+- [ ] ETag semantics for single-part vs multipart
+- [ ] Checksum headers behavior (when present)
+- [ ] Content-Type propagation and overrides
+- [ ] User-defined metadata (x-amz-meta-*) persistence
+- [ ] Content-Disposition / caching headers passthrough
+- [ ] HEAD vs GET parity for metadata
+- [ ] Pre-signed URL request verification
+- [ ] Chunked transfer encoding behavior
+- [ ] Large object streaming backpressure
+- [ ] Parallel delete bounded concurrency settings
+- [ ] CopyObject metadata directive behavior
+
+## Post-release hardening backlog (still for v0.1.x)
+
+### Correctness
+- [ ] Add golden-file tests for XML serialization (bucket/object errors)
+- [ ] Add integration tests for conditional GET/HEAD (If-* headers)
+- [ ] Add tests for Range requests (single, multiple, invalid ranges)
+- [ ] Verify behavior for empty keys and trailing slashes
+- [ ] Verify behavior for very long keys and deep prefixes
+- [ ] Verify behavior for keys containing spaces and reserved characters
+- [ ] Verify behavior for Unicode keys
+- [ ] Verify HEAD responses include consistent headers
+- [ ] Verify DeleteObjects partial failure response body
+- [ ] Verify CopyObject with x-amz-metadata-directive (COPY/REPLACE)
+- [ ] Verify server-side copy across buckets
+- [ ] Verify multipart: out-of-order part uploads
+- [ ] Verify multipart: repeated part upload overwrites part
+- [ ] Verify multipart: invalid part numbers
+- [ ] Verify multipart: Abort removes parts
+- [ ] Verify ListParts ordering and truncation
+- [ ] Verify ListMultipartUploads filters
+
+### Storage
+- [ ] Crash-safety: ensure metadata + data writes are consistent
+- [ ] Atomic rename strategy for uploads
+- [ ] Validate fsync strategy for durability (document tradeoffs)
+- [ ] Garbage collection for orphaned multipart parts
+- [ ] Ensure sidecar metadata format is versioned
+- [ ] Filesystem permission errors produce correct S3 errors
+- [ ] Protect against path traversal attempts
+- [ ] Handle low-disk-space failures cleanly
+- [ ] Benchmark compression thresholds and defaults
+- [ ] Document which data is compressed and when
+
+### Security
+- [ ] SigV4: validate canonical request edge cases
+- [ ] SigV4: query-param ordering and encoding
+- [ ] SigV4: chunked streaming signatures
+- [ ] Rate limit authentication failures to avoid brute-force
+- [ ] TLS: document cert/key configuration and rotation
+- [ ] Audit security-sensitive config in README
+
+### Observability
+- [ ] Ensure per-operation metrics labels are stable
+- [ ] Add exemplars/tracing IDs to latency histograms (if enabled)
+- [ ] Document Prometheus scrape configuration
+- [ ] Document OpenTelemetry env vars (OTEL_*)
+- [ ] Add a small Grafana dashboard starter (if not already present)
+
+### Operations
+- [ ] Document production sizing guidance (CPU, disk, network)
+- [ ] Document data directory layout
+- [ ] Ensure graceful shutdown waits for in-flight uploads
+- [ ] Add health probe details for Kubernetes
+- [ ] Add readiness vs liveness semantics
+
+### DX
+- [ ] Add minimal local dev workflow section
+- [ ] Add troubleshooting section (common misconfigurations)
+- [ ] Add a short API compatibility note (what is stubbed)
+- [ ] Add examples for boto3 and aws-cli
+- [ ] Add performance benchmark how-to
+
+### Bucket API test matrix
+- [ ] ListBuckets: success path returns expected XML fields
+- [ ] ListBuckets: missing bucket returns correct error code
+- [ ] ListBuckets: auth required (when enabled)
+- [ ] ListBuckets: metrics include operation label
+- [ ] CreateBucket: success path returns expected XML fields
+- [ ] CreateBucket: missing bucket returns correct error code
+- [ ] CreateBucket: auth required (when enabled)
+- [ ] CreateBucket: metrics include operation label
+- [ ] DeleteBucket: success path returns expected XML fields
+- [ ] DeleteBucket: missing bucket returns correct error code
+- [ ] DeleteBucket: auth required (when enabled)
+- [ ] DeleteBucket: metrics include operation label
+- [ ] HeadBucket: success path returns expected XML fields
+- [ ] HeadBucket: missing bucket returns correct error code
+- [ ] HeadBucket: auth required (when enabled)
+- [ ] HeadBucket: metrics include operation label
+- [ ] GetBucketLocation: success path returns expected XML fields
+- [ ] GetBucketLocation: missing bucket returns correct error code
+- [ ] GetBucketLocation: auth required (when enabled)
+- [ ] GetBucketLocation: metrics include operation label
+- [ ] GetBucketTagging: success path returns expected XML fields
+- [ ] GetBucketTagging: missing bucket returns correct error code
+- [ ] GetBucketTagging: auth required (when enabled)
+- [ ] GetBucketTagging: metrics include operation label
+- [ ] PutBucketTagging: success path returns expected XML fields
+- [ ] PutBucketTagging: missing bucket returns correct error code
+- [ ] PutBucketTagging: auth required (when enabled)
+- [ ] PutBucketTagging: metrics include operation label
+- [ ] DeleteBucketTagging: success path returns expected XML fields
+- [ ] DeleteBucketTagging: missing bucket returns correct error code
+- [ ] DeleteBucketTagging: auth required (when enabled)
+- [ ] DeleteBucketTagging: metrics include operation label
+- [ ] GetBucketPolicy: success path returns expected XML fields
+- [ ] GetBucketPolicy: missing bucket returns correct error code
+- [ ] GetBucketPolicy: auth required (when enabled)
+- [ ] GetBucketPolicy: metrics include operation label
+- [ ] PutBucketPolicy: success path returns expected XML fields
+- [ ] PutBucketPolicy: missing bucket returns correct error code
+- [ ] PutBucketPolicy: auth required (when enabled)
+- [ ] PutBucketPolicy: metrics include operation label
+- [ ] DeleteBucketPolicy: success path returns expected XML fields
+- [ ] DeleteBucketPolicy: missing bucket returns correct error code
+- [ ] DeleteBucketPolicy: auth required (when enabled)
+- [ ] DeleteBucketPolicy: metrics include operation label
+
+### Object API test matrix
+- [ ] PutObject: large object streaming (>= 1 GiB) does not OOM
+- [ ] PutObject: works with keys containing spaces
+- [ ] PutObject: works with deep prefixes
+- [ ] PutObject: returns stable request IDs (if implemented)
+- [ ] GetObject: large object streaming (>= 1 GiB) does not OOM
+- [ ] GetObject: works with keys containing spaces
+- [ ] GetObject: works with deep prefixes
+- [ ] GetObject: returns stable request IDs (if implemented)
+- [ ] HeadObject: large object streaming (>= 1 GiB) does not OOM
+- [ ] HeadObject: works with keys containing spaces
+- [ ] HeadObject: works with deep prefixes
+- [ ] HeadObject: returns stable request IDs (if implemented)
+- [ ] DeleteObject: large object streaming (>= 1 GiB) does not OOM
+- [ ] DeleteObject: works with keys containing spaces
+- [ ] DeleteObject: works with deep prefixes
+- [ ] DeleteObject: returns stable request IDs (if implemented)
+- [ ] DeleteObjects: large object streaming (>= 1 GiB) does not OOM
+- [ ] DeleteObjects: works with keys containing spaces
+- [ ] DeleteObjects: works with deep prefixes
+- [ ] DeleteObjects: returns stable request IDs (if implemented)
+- [ ] CopyObject: large object streaming (>= 1 GiB) does not OOM
+- [ ] CopyObject: works with keys containing spaces
+- [ ] CopyObject: works with deep prefixes
+- [ ] CopyObject: returns stable request IDs (if implemented)
+- [ ] ListObjectsV1: large object streaming (>= 1 GiB) does not OOM
+- [ ] ListObjectsV1: works with keys containing spaces
+- [ ] ListObjectsV1: works with deep prefixes
+- [ ] ListObjectsV1: returns stable request IDs (if implemented)
+- [ ] ListObjectsV2: large object streaming (>= 1 GiB) does not OOM
+- [ ] ListObjectsV2: works with keys containing spaces
+- [ ] ListObjectsV2: works with deep prefixes
+- [ ] ListObjectsV2: returns stable request IDs (if implemented)
+
+### Multipart API test matrix
+- [ ] CreateMultipartUpload: error response matches AWS shape
+- [ ] CreateMultipartUpload: supports concurrent clients
+- [ ] CreateMultipartUpload: respects request timeout
+- [ ] UploadPart: error response matches AWS shape
+- [ ] UploadPart: supports concurrent clients
+- [ ] UploadPart: respects request timeout
+- [ ] UploadPartCopy: error response matches AWS shape
+- [ ] UploadPartCopy: supports concurrent clients
+- [ ] UploadPartCopy: respects request timeout
+- [ ] CompleteMultipartUpload: error response matches AWS shape
+- [ ] CompleteMultipartUpload: supports concurrent clients
+- [ ] CompleteMultipartUpload: respects request timeout
+- [ ] AbortMultipartUpload: error response matches AWS shape
+- [ ] AbortMultipartUpload: supports concurrent clients
+- [ ] AbortMultipartUpload: respects request timeout
+- [ ] ListParts: error response matches AWS shape
+- [ ] ListParts: supports concurrent clients
+- [ ] ListParts: respects request timeout
+- [ ] ListMultipartUploads: error response matches AWS shape
+- [ ] ListMultipartUploads: supports concurrent clients
+- [ ] ListMultipartUploads: respects request timeout
+
+## gRPC (optional for v0.1.0, but tracked here)
+
+See src/grpc/README.md for protocol details and default ports.
+
+- [ ] Configuration via RS3GW_GRPC_ENABLED / RS3GW_GRPC_PORT
+- [ ] TLS support via RS3GW_GRPC_TLS_CERT / RS3GW_GRPC_TLS_KEY
+- [ ] BucketService basic operations
+- [ ] ObjectService streaming correctness
+- [ ] Multipart service parity with REST
+- [ ] Integration tests covering gRPC endpoints
+
+## Cluster mode (future / optional)
+
+See src/cluster/README.md for env vars and topology notes.
+
+- [ ] ClusterConfig parsing and validation
+- [ ] Gossip membership convergence
+- [ ] Replication mode: async
+- [ ] Replication mode: sync
+- [ ] Replication mode: quorum
+- [ ] Failure handling and rebalancing
+- [ ] Conflict resolution semantics (define/document)
+- [ ] Metrics for replication lag and failures
+
+## Roadmap beyond v0.1.0
+
+### v0.2 (Usability + completeness)
+- [ ] Clarify and document all stubbed S3 APIs
+- [ ] Improve error messages and compatibility codes
+- [ ] Add `rs3ctl` workflows (if present) for common admin tasks
+- [ ] Improve docs for local dev + docker compose
+- [ ] Add more integration tests for AWS SDKs
+
+### v0.3 (Performance + stability)
+- [ ] Benchmarks: publish baseline numbers and how to reproduce
+- [ ] Profile typical workloads (small objects, large objects, mixed)
+- [ ] Optimize hot paths identified by profiling
+- [ ] Backpressure and timeout tuning guidance
+- [ ] Add soak tests (long-running)
+
+### v0.4 (Advanced storage features)
+- [ ] Deduplication: document tradeoffs and minimum object size
+- [ ] Select cache: validate TTL and memory caps
+- [ ] Quota: enforcement semantics and errors
+- [ ] Throttling: per-client and global behavior
+
+### v0.5 (Observability depth)
+- [ ] Improve tracing spans and attributes for S3 operations
+- [ ] Ensure Prometheus metrics stability guarantees
+- [ ] Add alerting recommendations (SLO-based)
+- [ ] Add cost/usage reporting hooks (if desired)
+
+## Detailed backlog (prioritized, concrete)
+
+### REST API
+- [ ] Audit request routing for ambiguous paths
+- [ ] Ensure all handlers set Content-Length correctly where applicable
+- [ ] Ensure streaming responses use correct chunking
+- [ ] Add request ID header propagation (if desired)
+- [ ] Ensure XML error bodies are always valid XML
+- [ ] Harden query parsing against invalid encodings
+- [ ] Add negative tests for malformed XML inputs
+- [ ] Verify time skew tolerance for SigV4
+- [ ] Document supported regions/LocationConstraint behavior
+
+### Storage engine
+- [ ] Document on-disk layout (data, metadata, multipart temp)
+- [ ] Add periodic cleanup for abandoned uploads
+- [ ] Add config option for multipart temp retention
+- [ ] Consider checksum validation on read
+- [ ] Ensure metadata read/write is lock-safe
+- [ ] Validate behavior under concurrent reads/writes
+- [ ] Add fsync toggle for performance vs durability
+
+### Auth
+- [ ] Explicitly define unauthenticated mode semantics
+- [ ] Ensure auth errors do not leak sensitive details
+- [ ] Add tests for unsigned payload (UNSIGNED-PAYLOAD)
+- [ ] Add tests for streaming signed payloads
+- [ ] Document canonical header requirements
+
+### Metrics
+- [ ] Confirm histogram buckets are appropriate for expected latencies
+- [ ] Add metrics for object size distribution
+- [ ] Add metrics for cache hit/miss
+- [ ] Add metrics for dedup savings
+- [ ] Add metrics for compression ratio
+
+### Testing
+- [ ] Add aws-cli based smoke tests to CI
+- [ ] Add boto3 integration tests for pagination
+- [ ] Add regression tests for previously fixed bugs
+- [ ] Add fuzzing targets for XML parsing (optional)
+
+### Docs
+- [ ] Document all environment variables (one table)
+- [ ] Document config precedence: env overrides TOML
+- [ ] Document upgrade notes for on-disk format changes
+- [ ] Document known limitations
+
+## S3 compatibility deep-dive tasks
+
+### Bucket deep-dive
+- [ ] Verify XML shape for bucket operation #001
+- [ ] Verify XML shape for bucket operation #002
+- [ ] Verify XML shape for bucket operation #003
+- [ ] Verify XML shape for bucket operation #004
+- [ ] Verify XML shape for bucket operation #005
+- [ ] Verify XML shape for bucket operation #006
+- [ ] Verify XML shape for bucket operation #007
+- [ ] Verify XML shape for bucket operation #008
+- [ ] Verify XML shape for bucket operation #009
+- [ ] Verify XML shape for bucket operation #010
+- [ ] Verify XML shape for bucket operation #011
+- [ ] Verify XML shape for bucket operation #012
+- [ ] Verify XML shape for bucket operation #013
+- [ ] Verify XML shape for bucket operation #014
+- [ ] Verify XML shape for bucket operation #015
+- [ ] Verify XML shape for bucket operation #016
+- [ ] Verify XML shape for bucket operation #017
+- [ ] Verify XML shape for bucket operation #018
+- [ ] Verify XML shape for bucket operation #019
+- [ ] Verify XML shape for bucket operation #020
+- [ ] Verify XML shape for bucket operation #021
+- [ ] Verify XML shape for bucket operation #022
+- [ ] Verify XML shape for bucket operation #023
+- [ ] Verify XML shape for bucket operation #024
+- [ ] Verify XML shape for bucket operation #025
+- [ ] Verify XML shape for bucket operation #026
+- [ ] Verify XML shape for bucket operation #027
+- [ ] Verify XML shape for bucket operation #028
+- [ ] Verify XML shape for bucket operation #029
+- [ ] Verify XML shape for bucket operation #030
+- [ ] Verify XML shape for bucket operation #031
+- [ ] Verify XML shape for bucket operation #032
+- [ ] Verify XML shape for bucket operation #033
+- [ ] Verify XML shape for bucket operation #034
+- [ ] Verify XML shape for bucket operation #035
+- [ ] Verify XML shape for bucket operation #036
+- [ ] Verify XML shape for bucket operation #037
+- [ ] Verify XML shape for bucket operation #038
+- [ ] Verify XML shape for bucket operation #039
+- [ ] Verify XML shape for bucket operation #040
+- [ ] Verify XML shape for bucket operation #041
+- [ ] Verify XML shape for bucket operation #042
+- [ ] Verify XML shape for bucket operation #043
+- [ ] Verify XML shape for bucket operation #044
+- [ ] Verify XML shape for bucket operation #045
+- [ ] Verify XML shape for bucket operation #046
+- [ ] Verify XML shape for bucket operation #047
+- [ ] Verify XML shape for bucket operation #048
+- [ ] Verify XML shape for bucket operation #049
+- [ ] Verify XML shape for bucket operation #050
+- [ ] Verify XML shape for bucket operation #051
+- [ ] Verify XML shape for bucket operation #052
+- [ ] Verify XML shape for bucket operation #053
+- [ ] Verify XML shape for bucket operation #054
+- [ ] Verify XML shape for bucket operation #055
+- [ ] Verify XML shape for bucket operation #056
+- [ ] Verify XML shape for bucket operation #057
+- [ ] Verify XML shape for bucket operation #058
+- [ ] Verify XML shape for bucket operation #059
+- [ ] Verify XML shape for bucket operation #060
+- [ ] Verify XML shape for bucket operation #061
+- [ ] Verify XML shape for bucket operation #062
+- [ ] Verify XML shape for bucket operation #063
+- [ ] Verify XML shape for bucket operation #064
+- [ ] Verify XML shape for bucket operation #065
+- [ ] Verify XML shape for bucket operation #066
+- [ ] Verify XML shape for bucket operation #067
+- [ ] Verify XML shape for bucket operation #068
+- [ ] Verify XML shape for bucket operation #069
+- [ ] Verify XML shape for bucket operation #070
+- [ ] Verify XML shape for bucket operation #071
+- [ ] Verify XML shape for bucket operation #072
+- [ ] Verify XML shape for bucket operation #073
+- [ ] Verify XML shape for bucket operation #074
+- [ ] Verify XML shape for bucket operation #075
+- [ ] Verify XML shape for bucket operation #076
+- [ ] Verify XML shape for bucket operation #077
+- [ ] Verify XML shape for bucket operation #078
+- [ ] Verify XML shape for bucket operation #079
+- [ ] Verify XML shape for bucket operation #080
+- [ ] Verify XML shape for bucket operation #081
+- [ ] Verify XML shape for bucket operation #082
+- [ ] Verify XML shape for bucket operation #083
+- [ ] Verify XML shape for bucket operation #084
+- [ ] Verify XML shape for bucket operation #085
+- [ ] Verify XML shape for bucket operation #086
+- [ ] Verify XML shape for bucket operation #087
+- [ ] Verify XML shape for bucket operation #088
+- [ ] Verify XML shape for bucket operation #089
+- [ ] Verify XML shape for bucket operation #090
+- [ ] Verify XML shape for bucket operation #091
+- [ ] Verify XML shape for bucket operation #092
+- [ ] Verify XML shape for bucket operation #093
+- [ ] Verify XML shape for bucket operation #094
+- [ ] Verify XML shape for bucket operation #095
+- [ ] Verify XML shape for bucket operation #096
+- [ ] Verify XML shape for bucket operation #097
+- [ ] Verify XML shape for bucket operation #098
+- [ ] Verify XML shape for bucket operation #099
+- [ ] Verify XML shape for bucket operation #100
+- [ ] Verify XML shape for bucket operation #101
+- [ ] Verify XML shape for bucket operation #102
+- [ ] Verify XML shape for bucket operation #103
+- [ ] Verify XML shape for bucket operation #104
+- [ ] Verify XML shape for bucket operation #105
+- [ ] Verify XML shape for bucket operation #106
+- [ ] Verify XML shape for bucket operation #107
+- [ ] Verify XML shape for bucket operation #108
+- [ ] Verify XML shape for bucket operation #109
+- [ ] Verify XML shape for bucket operation #110
+- [ ] Verify XML shape for bucket operation #111
+- [ ] Verify XML shape for bucket operation #112
+- [ ] Verify XML shape for bucket operation #113
+- [ ] Verify XML shape for bucket operation #114
+- [ ] Verify XML shape for bucket operation #115
+- [ ] Verify XML shape for bucket operation #116
+- [ ] Verify XML shape for bucket operation #117
+- [ ] Verify XML shape for bucket operation #118
+- [ ] Verify XML shape for bucket operation #119
+- [ ] Verify XML shape for bucket operation #120
+
+### Object deep-dive
+- [ ] Verify headers/metadata semantics for object operation #001
+- [ ] Verify headers/metadata semantics for object operation #002
+- [ ] Verify headers/metadata semantics for object operation #003
+- [ ] Verify headers/metadata semantics for object operation #004
+- [ ] Verify headers/metadata semantics for object operation #005
+- [ ] Verify headers/metadata semantics for object operation #006
+- [ ] Verify headers/metadata semantics for object operation #007
+- [ ] Verify headers/metadata semantics for object operation #008
+- [ ] Verify headers/metadata semantics for object operation #009
+- [ ] Verify headers/metadata semantics for object operation #010
+- [ ] Verify headers/metadata semantics for object operation #011
+- [ ] Verify headers/metadata semantics for object operation #012
+- [ ] Verify headers/metadata semantics for object operation #013
+- [ ] Verify headers/metadata semantics for object operation #014
+- [ ] Verify headers/metadata semantics for object operation #015
+- [ ] Verify headers/metadata semantics for object operation #016
+- [ ] Verify headers/metadata semantics for object operation #017
+- [ ] Verify headers/metadata semantics for object operation #018
+- [ ] Verify headers/metadata semantics for object operation #019
+- [ ] Verify headers/metadata semantics for object operation #020
+- [ ] Verify headers/metadata semantics for object operation #021
+- [ ] Verify headers/metadata semantics for object operation #022
+- [ ] Verify headers/metadata semantics for object operation #023
+- [ ] Verify headers/metadata semantics for object operation #024
+- [ ] Verify headers/metadata semantics for object operation #025
+- [ ] Verify headers/metadata semantics for object operation #026
+- [ ] Verify headers/metadata semantics for object operation #027
+- [ ] Verify headers/metadata semantics for object operation #028
+- [ ] Verify headers/metadata semantics for object operation #029
+- [ ] Verify headers/metadata semantics for object operation #030
+- [ ] Verify headers/metadata semantics for object operation #031
+- [ ] Verify headers/metadata semantics for object operation #032
+- [ ] Verify headers/metadata semantics for object operation #033
+- [ ] Verify headers/metadata semantics for object operation #034
+- [ ] Verify headers/metadata semantics for object operation #035
+- [ ] Verify headers/metadata semantics for object operation #036
+- [ ] Verify headers/metadata semantics for object operation #037
+- [ ] Verify headers/metadata semantics for object operation #038
+- [ ] Verify headers/metadata semantics for object operation #039
+- [ ] Verify headers/metadata semantics for object operation #040
+- [ ] Verify headers/metadata semantics for object operation #041
+- [ ] Verify headers/metadata semantics for object operation #042
+- [ ] Verify headers/metadata semantics for object operation #043
+- [ ] Verify headers/metadata semantics for object operation #044
+- [ ] Verify headers/metadata semantics for object operation #045
+- [ ] Verify headers/metadata semantics for object operation #046
+- [ ] Verify headers/metadata semantics for object operation #047
+- [ ] Verify headers/metadata semantics for object operation #048
+- [ ] Verify headers/metadata semantics for object operation #049
+- [ ] Verify headers/metadata semantics for object operation #050
+- [ ] Verify headers/metadata semantics for object operation #051
+- [ ] Verify headers/metadata semantics for object operation #052
+- [ ] Verify headers/metadata semantics for object operation #053
+- [ ] Verify headers/metadata semantics for object operation #054
+- [ ] Verify headers/metadata semantics for object operation #055
+- [ ] Verify headers/metadata semantics for object operation #056
+- [ ] Verify headers/metadata semantics for object operation #057
+- [ ] Verify headers/metadata semantics for object operation #058
+- [ ] Verify headers/metadata semantics for object operation #059
+- [ ] Verify headers/metadata semantics for object operation #060
+- [ ] Verify headers/metadata semantics for object operation #061
+- [ ] Verify headers/metadata semantics for object operation #062
+- [ ] Verify headers/metadata semantics for object operation #063
+- [ ] Verify headers/metadata semantics for object operation #064
+- [ ] Verify headers/metadata semantics for object operation #065
+- [ ] Verify headers/metadata semantics for object operation #066
+- [ ] Verify headers/metadata semantics for object operation #067
+- [ ] Verify headers/metadata semantics for object operation #068
+- [ ] Verify headers/metadata semantics for object operation #069
+- [ ] Verify headers/metadata semantics for object operation #070
+- [ ] Verify headers/metadata semantics for object operation #071
+- [ ] Verify headers/metadata semantics for object operation #072
+- [ ] Verify headers/metadata semantics for object operation #073
+- [ ] Verify headers/metadata semantics for object operation #074
+- [ ] Verify headers/metadata semantics for object operation #075
+- [ ] Verify headers/metadata semantics for object operation #076
+- [ ] Verify headers/metadata semantics for object operation #077
+- [ ] Verify headers/metadata semantics for object operation #078
+- [ ] Verify headers/metadata semantics for object operation #079
+- [ ] Verify headers/metadata semantics for object operation #080
+- [ ] Verify headers/metadata semantics for object operation #081
+- [ ] Verify headers/metadata semantics for object operation #082
+- [ ] Verify headers/metadata semantics for object operation #083
+- [ ] Verify headers/metadata semantics for object operation #084
+- [ ] Verify headers/metadata semantics for object operation #085
+- [ ] Verify headers/metadata semantics for object operation #086
+- [ ] Verify headers/metadata semantics for object operation #087
+- [ ] Verify headers/metadata semantics for object operation #088
+- [ ] Verify headers/metadata semantics for object operation #089
+- [ ] Verify headers/metadata semantics for object operation #090
+- [ ] Verify headers/metadata semantics for object operation #091
+- [ ] Verify headers/metadata semantics for object operation #092
+- [ ] Verify headers/metadata semantics for object operation #093
+- [ ] Verify headers/metadata semantics for object operation #094
+- [ ] Verify headers/metadata semantics for object operation #095
+- [ ] Verify headers/metadata semantics for object operation #096
+- [ ] Verify headers/metadata semantics for object operation #097
+- [ ] Verify headers/metadata semantics for object operation #098
+- [ ] Verify headers/metadata semantics for object operation #099
+- [ ] Verify headers/metadata semantics for object operation #100
+- [ ] Verify headers/metadata semantics for object operation #101
+- [ ] Verify headers/metadata semantics for object operation #102
+- [ ] Verify headers/metadata semantics for object operation #103
+- [ ] Verify headers/metadata semantics for object operation #104
+- [ ] Verify headers/metadata semantics for object operation #105
+- [ ] Verify headers/metadata semantics for object operation #106
+- [ ] Verify headers/metadata semantics for object operation #107
+- [ ] Verify headers/metadata semantics for object operation #108
+- [ ] Verify headers/metadata semantics for object operation #109
+- [ ] Verify headers/metadata semantics for object operation #110
+- [ ] Verify headers/metadata semantics for object operation #111
+- [ ] Verify headers/metadata semantics for object operation #112
+- [ ] Verify headers/metadata semantics for object operation #113
+- [ ] Verify headers/metadata semantics for object operation #114
+- [ ] Verify headers/metadata semantics for object operation #115
+- [ ] Verify headers/metadata semantics for object operation #116
+- [ ] Verify headers/metadata semantics for object operation #117
+- [ ] Verify headers/metadata semantics for object operation #118
+- [ ] Verify headers/metadata semantics for object operation #119
+- [ ] Verify headers/metadata semantics for object operation #120
+- [ ] Verify headers/metadata semantics for object operation #121
+- [ ] Verify headers/metadata semantics for object operation #122
+- [ ] Verify headers/metadata semantics for object operation #123
+- [ ] Verify headers/metadata semantics for object operation #124
+- [ ] Verify headers/metadata semantics for object operation #125
+- [ ] Verify headers/metadata semantics for object operation #126
+- [ ] Verify headers/metadata semantics for object operation #127
+- [ ] Verify headers/metadata semantics for object operation #128
+- [ ] Verify headers/metadata semantics for object operation #129
+- [ ] Verify headers/metadata semantics for object operation #130
+- [ ] Verify headers/metadata semantics for object operation #131
+- [ ] Verify headers/metadata semantics for object operation #132
+- [ ] Verify headers/metadata semantics for object operation #133
+- [ ] Verify headers/metadata semantics for object operation #134
+- [ ] Verify headers/metadata semantics for object operation #135
+- [ ] Verify headers/metadata semantics for object operation #136
+- [ ] Verify headers/metadata semantics for object operation #137
+- [ ] Verify headers/metadata semantics for object operation #138
+- [ ] Verify headers/metadata semantics for object operation #139
+- [ ] Verify headers/metadata semantics for object operation #140
+- [ ] Verify headers/metadata semantics for object operation #141
+- [ ] Verify headers/metadata semantics for object operation #142
+- [ ] Verify headers/metadata semantics for object operation #143
+- [ ] Verify headers/metadata semantics for object operation #144
+- [ ] Verify headers/metadata semantics for object operation #145
+- [ ] Verify headers/metadata semantics for object operation #146
+- [ ] Verify headers/metadata semantics for object operation #147
+- [ ] Verify headers/metadata semantics for object operation #148
+- [ ] Verify headers/metadata semantics for object operation #149
+- [ ] Verify headers/metadata semantics for object operation #150
+- [ ] Verify headers/metadata semantics for object operation #151
+- [ ] Verify headers/metadata semantics for object operation #152
+- [ ] Verify headers/metadata semantics for object operation #153
+- [ ] Verify headers/metadata semantics for object operation #154
+- [ ] Verify headers/metadata semantics for object operation #155
+- [ ] Verify headers/metadata semantics for object operation #156
+- [ ] Verify headers/metadata semantics for object operation #157
+- [ ] Verify headers/metadata semantics for object operation #158
+- [ ] Verify headers/metadata semantics for object operation #159
+- [ ] Verify headers/metadata semantics for object operation #160
+- [ ] Verify headers/metadata semantics for object operation #161
+- [ ] Verify headers/metadata semantics for object operation #162
+- [ ] Verify headers/metadata semantics for object operation #163
+- [ ] Verify headers/metadata semantics for object operation #164
+- [ ] Verify headers/metadata semantics for object operation #165
+- [ ] Verify headers/metadata semantics for object operation #166
+- [ ] Verify headers/metadata semantics for object operation #167
+- [ ] Verify headers/metadata semantics for object operation #168
+- [ ] Verify headers/metadata semantics for object operation #169
+- [ ] Verify headers/metadata semantics for object operation #170
+- [ ] Verify headers/metadata semantics for object operation #171
+- [ ] Verify headers/metadata semantics for object operation #172
+- [ ] Verify headers/metadata semantics for object operation #173
+- [ ] Verify headers/metadata semantics for object operation #174
+- [ ] Verify headers/metadata semantics for object operation #175
+- [ ] Verify headers/metadata semantics for object operation #176
+- [ ] Verify headers/metadata semantics for object operation #177
+- [ ] Verify headers/metadata semantics for object operation #178
+- [ ] Verify headers/metadata semantics for object operation #179
+- [ ] Verify headers/metadata semantics for object operation #180
+
+### Multipart deep-dive
+- [ ] Verify multipart edge case #001
+- [ ] Verify multipart edge case #002
+- [ ] Verify multipart edge case #003
+- [ ] Verify multipart edge case #004
+- [ ] Verify multipart edge case #005
+- [ ] Verify multipart edge case #006
+- [ ] Verify multipart edge case #007
+- [ ] Verify multipart edge case #008
+- [ ] Verify multipart edge case #009
+- [ ] Verify multipart edge case #010
+- [ ] Verify multipart edge case #011
+- [ ] Verify multipart edge case #012
+- [ ] Verify multipart edge case #013
+- [ ] Verify multipart edge case #014
+- [ ] Verify multipart edge case #015
+- [ ] Verify multipart edge case #016
+- [ ] Verify multipart edge case #017
+- [ ] Verify multipart edge case #018
+- [ ] Verify multipart edge case #019
+- [ ] Verify multipart edge case #020
+- [ ] Verify multipart edge case #021
+- [ ] Verify multipart edge case #022
+- [ ] Verify multipart edge case #023
+- [ ] Verify multipart edge case #024
+- [ ] Verify multipart edge case #025
+- [ ] Verify multipart edge case #026
+- [ ] Verify multipart edge case #027
+- [ ] Verify multipart edge case #028
+- [ ] Verify multipart edge case #029
+- [ ] Verify multipart edge case #030
+- [ ] Verify multipart edge case #031
+- [ ] Verify multipart edge case #032
+- [ ] Verify multipart edge case #033
+- [ ] Verify multipart edge case #034
+- [ ] Verify multipart edge case #035
+- [ ] Verify multipart edge case #036
+- [ ] Verify multipart edge case #037
+- [ ] Verify multipart edge case #038
+- [ ] Verify multipart edge case #039
+- [ ] Verify multipart edge case #040
+- [ ] Verify multipart edge case #041
+- [ ] Verify multipart edge case #042
+- [ ] Verify multipart edge case #043
+- [ ] Verify multipart edge case #044
+- [ ] Verify multipart edge case #045
+- [ ] Verify multipart edge case #046
+- [ ] Verify multipart edge case #047
+- [ ] Verify multipart edge case #048
+- [ ] Verify multipart edge case #049
+- [ ] Verify multipart edge case #050
+- [ ] Verify multipart edge case #051
+- [ ] Verify multipart edge case #052
+- [ ] Verify multipart edge case #053
+- [ ] Verify multipart edge case #054
+- [ ] Verify multipart edge case #055
+- [ ] Verify multipart edge case #056
+- [ ] Verify multipart edge case #057
+- [ ] Verify multipart edge case #058
+- [ ] Verify multipart edge case #059
+- [ ] Verify multipart edge case #060
+- [ ] Verify multipart edge case #061
+- [ ] Verify multipart edge case #062
+- [ ] Verify multipart edge case #063
+- [ ] Verify multipart edge case #064
+- [ ] Verify multipart edge case #065
+- [ ] Verify multipart edge case #066
+- [ ] Verify multipart edge case #067
+- [ ] Verify multipart edge case #068
+- [ ] Verify multipart edge case #069
+- [ ] Verify multipart edge case #070
+- [ ] Verify multipart edge case #071
+- [ ] Verify multipart edge case #072
+- [ ] Verify multipart edge case #073
+- [ ] Verify multipart edge case #074
+- [ ] Verify multipart edge case #075
+- [ ] Verify multipart edge case #076
+- [ ] Verify multipart edge case #077
+- [ ] Verify multipart edge case #078
+- [ ] Verify multipart edge case #079
+- [ ] Verify multipart edge case #080
+- [ ] Verify multipart edge case #081
+- [ ] Verify multipart edge case #082
+- [ ] Verify multipart edge case #083
+- [ ] Verify multipart edge case #084
+- [ ] Verify multipart edge case #085
+- [ ] Verify multipart edge case #086
+- [ ] Verify multipart edge case #087
+- [ ] Verify multipart edge case #088
+- [ ] Verify multipart edge case #089
+- [ ] Verify multipart edge case #090
+
+### Error mapping deep-dive
+- [ ] Verify error code mapping #001
+- [ ] Verify error code mapping #002
+- [ ] Verify error code mapping #003
+- [ ] Verify error code mapping #004
+- [ ] Verify error code mapping #005
+- [ ] Verify error code mapping #006
+- [ ] Verify error code mapping #007
+- [ ] Verify error code mapping #008
+- [ ] Verify error code mapping #009
+- [ ] Verify error code mapping #010
+- [ ] Verify error code mapping #011
+- [ ] Verify error code mapping #012
+- [ ] Verify error code mapping #013
+- [ ] Verify error code mapping #014
+- [ ] Verify error code mapping #015
+- [ ] Verify error code mapping #016
+- [ ] Verify error code mapping #017
+- [ ] Verify error code mapping #018
+- [ ] Verify error code mapping #019
+- [ ] Verify error code mapping #020
+- [ ] Verify error code mapping #021
+- [ ] Verify error code mapping #022
+- [ ] Verify error code mapping #023
+- [ ] Verify error code mapping #024
+- [ ] Verify error code mapping #025
+- [ ] Verify error code mapping #026
+- [ ] Verify error code mapping #027
+- [ ] Verify error code mapping #028
+- [ ] Verify error code mapping #029
+- [ ] Verify error code mapping #030
+- [ ] Verify error code mapping #031
+- [ ] Verify error code mapping #032
+- [ ] Verify error code mapping #033
+- [ ] Verify error code mapping #034
+- [ ] Verify error code mapping #035
+- [ ] Verify error code mapping #036
+- [ ] Verify error code mapping #037
+- [ ] Verify error code mapping #038
+- [ ] Verify error code mapping #039
+- [ ] Verify error code mapping #040
+- [ ] Verify error code mapping #041
+- [ ] Verify error code mapping #042
+- [ ] Verify error code mapping #043
+- [ ] Verify error code mapping #044
+- [ ] Verify error code mapping #045
+- [ ] Verify error code mapping #046
+- [ ] Verify error code mapping #047
+- [ ] Verify error code mapping #048
+- [ ] Verify error code mapping #049
+- [ ] Verify error code mapping #050
+- [ ] Verify error code mapping #051
+- [ ] Verify error code mapping #052
+- [ ] Verify error code mapping #053
+- [ ] Verify error code mapping #054
+- [ ] Verify error code mapping #055
+- [ ] Verify error code mapping #056
+- [ ] Verify error code mapping #057
+- [ ] Verify error code mapping #058
+- [ ] Verify error code mapping #059
+- [ ] Verify error code mapping #060
+- [ ] Verify error code mapping #061
+- [ ] Verify error code mapping #062
+- [ ] Verify error code mapping #063
+- [ ] Verify error code mapping #064
+- [ ] Verify error code mapping #065
+- [ ] Verify error code mapping #066
+- [ ] Verify error code mapping #067

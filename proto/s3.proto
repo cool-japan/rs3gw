@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package rs3gw;
+
+import "google/protobuf/empty.proto";
+import "bucket.proto";
+import "object.proto";
+import "multipart.proto";
+
+// ============================================================================
+// S3 Gateway Service
+// ============================================================================
+
+service S3Service {
+  // ===== Bucket Operations (Unary) =====
+  rpc ListBuckets(rs3gw.bucket.ListBucketsRequest) returns (rs3gw.bucket.ListBucketsResponse);
+  rpc CreateBucket(rs3gw.bucket.CreateBucketRequest) returns (rs3gw.bucket.CreateBucketResponse);
+  rpc DeleteBucket(rs3gw.bucket.DeleteBucketRequest) returns (google.protobuf.Empty);
+  rpc HeadBucket(rs3gw.bucket.HeadBucketRequest) returns (rs3gw.bucket.HeadBucketResponse);
+  rpc GetBucketLocation(rs3gw.bucket.GetBucketLocationRequest) returns (rs3gw.bucket.GetBucketLocationResponse);
+  rpc GetBucketMetadata(rs3gw.bucket.GetBucketMetadataRequest) returns (rs3gw.bucket.GetBucketMetadataResponse);
+
+  // Bucket Tagging
+  rpc PutBucketTagging(rs3gw.bucket.PutBucketTaggingRequest) returns (google.protobuf.Empty);
+  rpc GetBucketTagging(rs3gw.bucket.GetBucketTaggingRequest) returns (rs3gw.bucket.GetBucketTaggingResponse);
+  rpc DeleteBucketTagging(rs3gw.bucket.DeleteBucketTaggingRequest) returns (google.protobuf.Empty);
+
+  // Bucket Policy
+  rpc PutBucketPolicy(rs3gw.bucket.PutBucketPolicyRequest) returns (google.protobuf.Empty);
+  rpc GetBucketPolicy(rs3gw.bucket.GetBucketPolicyRequest) returns (rs3gw.bucket.GetBucketPolicyResponse);
+  rpc DeleteBucketPolicy(rs3gw.bucket.DeleteBucketPolicyRequest) returns (google.protobuf.Empty);
+
+  // Bucket Versioning
+  rpc PutBucketVersioning(rs3gw.bucket.PutBucketVersioningRequest) returns (google.protobuf.Empty);
+  rpc GetBucketVersioning(rs3gw.bucket.GetBucketVersioningRequest) returns (rs3gw.bucket.GetBucketVersioningResponse);
+
+  // ===== Object Operations (Unary and Streaming) =====
+
+  // Listing (Server Streaming)
+  rpc ListObjects(rs3gw.object.ListObjectsRequest) returns (stream rs3gw.object.ObjectInfo);
+  rpc ListObjectsPaginated(rs3gw.object.ListObjectsRequest) returns (rs3gw.object.ListObjectsResponse);
+
+  // Get Object (Server Streaming for large files)
+  rpc GetObject(rs3gw.object.GetObjectRequest) returns (rs3gw.object.GetObjectResponse);
+  rpc GetObjectStream(rs3gw.object.GetObjectRequest) returns (stream rs3gw.object.GetObjectResponse);
+
+  // Put Object (Unary and Client Streaming)
+  rpc PutObject(rs3gw.object.PutObjectRequest) returns (rs3gw.object.PutObjectResponse);
+  rpc PutObjectStream(stream rs3gw.object.PutObjectStreamRequest) returns (rs3gw.object.PutObjectResponse);
+
+  // Delete Object
+  rpc DeleteObject(rs3gw.object.DeleteObjectRequest) returns (rs3gw.object.DeleteObjectResponse);
+  rpc DeleteObjects(rs3gw.object.DeleteObjectsRequest) returns (rs3gw.object.DeleteObjectsResponse);
+
+  // Head Object
+  rpc HeadObject(rs3gw.object.HeadObjectRequest) returns (rs3gw.object.HeadObjectResponse);
+
+  // Copy Object
+  rpc CopyObject(rs3gw.object.CopyObjectRequest) returns (rs3gw.object.CopyObjectResponse);
+
+  // Object Attributes
+  rpc GetObjectAttributes(rs3gw.object.GetObjectAttributesRequest) returns (rs3gw.object.GetObjectAttributesResponse);
+
+  // Object Tagging
+  rpc PutObjectTagging(rs3gw.object.PutObjectTaggingRequest) returns (google.protobuf.Empty);
+  rpc GetObjectTagging(rs3gw.object.GetObjectTaggingRequest) returns (rs3gw.object.GetObjectTaggingResponse);
+  rpc DeleteObjectTagging(rs3gw.object.DeleteObjectTaggingRequest) returns (rs3gw.object.DeleteObjectTaggingResponse);
+
+  // ===== Multipart Upload Operations =====
+
+  // Create Multipart Upload
+  rpc CreateMultipartUpload(rs3gw.multipart.CreateMultipartUploadRequest) returns (rs3gw.multipart.CreateMultipartUploadResponse);
+
+  // Upload Part (Unary and Client Streaming)
+  rpc UploadPart(rs3gw.multipart.UploadPartRequest) returns (rs3gw.multipart.UploadPartResponse);
+  rpc UploadPartStream(stream rs3gw.multipart.UploadPartStreamRequest) returns (rs3gw.multipart.UploadPartResponse);
+
+  // Upload Part Copy
+  rpc UploadPartCopy(rs3gw.multipart.UploadPartCopyRequest) returns (rs3gw.multipart.UploadPartCopyResponse);
+
+  // Complete/Abort Multipart Upload
+  rpc CompleteMultipartUpload(rs3gw.multipart.CompleteMultipartUploadRequest) returns (rs3gw.multipart.CompleteMultipartUploadResponse);
+  rpc AbortMultipartUpload(rs3gw.multipart.AbortMultipartUploadRequest) returns (google.protobuf.Empty);
+
+  // List Parts and Uploads (Server Streaming)
+  rpc ListParts(rs3gw.multipart.ListPartsRequest) returns (rs3gw.multipart.ListPartsResponse);
+  rpc ListMultipartUploads(rs3gw.multipart.ListMultipartUploadsRequest) returns (rs3gw.multipart.ListMultipartUploadsResponse);
+}

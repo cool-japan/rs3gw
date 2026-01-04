@@ -1,0 +1,52 @@
+{
+  "id": "video-frame-extraction",
+  "name": "Video Frame Extraction",
+  "version": "1.0.0",
+  "description": "Extract and preprocess frames from video for action recognition or video classification",
+  "steps": [
+    {
+      "id": "extract_frames",
+      "step_type": "video_frames",
+      "config": {
+        "fps": 1,
+        "max_frames": 16,
+        "sampling_strategy": "uniform",
+        "output_format": "rgb"
+      },
+      "cache_results": true,
+      "description": "Extract 16 frames uniformly from video at 1 FPS"
+    },
+    {
+      "id": "resize_frames",
+      "step_type": "image_resize",
+      "config": {
+        "width": 224,
+        "height": 224,
+        "mode": "fit",
+        "filter": "bilinear"
+      },
+      "cache_results": false,
+      "description": "Resize each frame to 224x224"
+    },
+    {
+      "id": "normalize_frames",
+      "step_type": "image_normalization",
+      "config": {
+        "mean": [0.45, 0.45, 0.45],
+        "std": [0.225, 0.225, 0.225],
+        "normalize_range": true
+      },
+      "cache_results": false,
+      "description": "Normalize frames for video classification models"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "video-ai-team",
+    "target_model": "I3D/SlowFast/TimeSformer",
+    "dataset": "Kinetics-400/UCF-101",
+    "use_case": "Action recognition and video classification",
+    "recommended_batch_size": 4,
+    "notes": "Extracts uniformly sampled frames for temporal modeling"
+  }
+}

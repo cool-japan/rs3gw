@@ -1,0 +1,40 @@
+{
+  "id": "dinov2-preprocessing",
+  "name": "DINOv2 Preprocessing",
+  "version": "1.0.0",
+  "description": "Meta DINOv2 preprocessing pipeline for self-supervised vision learning",
+  "steps": [
+    {
+      "id": "resize",
+      "step_type": "image_resize",
+      "config": {
+        "width": 518,
+        "height": 518,
+        "mode": "fit",
+        "filter": "bicubic"
+      },
+      "cache_results": false,
+      "description": "Resize to 518x518 with bicubic interpolation (DINOv2 standard)"
+    },
+    {
+      "id": "normalize",
+      "step_type": "image_normalization",
+      "config": {
+        "mean": [0.485, 0.456, 0.406],
+        "std": [0.229, 0.224, 0.225],
+        "normalize_range": true
+      },
+      "cache_results": true,
+      "description": "Apply ImageNet normalization (DINOv2 uses standard ImageNet stats)"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "rs3gw-team",
+    "target_model": "Meta DINOv2 (ViT-S/14, ViT-B/14, ViT-L/14, ViT-g/14)",
+    "use_case": "Self-supervised learning, Feature extraction, Dense prediction tasks",
+    "framework": "PyTorch/HuggingFace Transformers",
+    "reference": "https://github.com/facebookresearch/dinov2",
+    "notes": "DINOv2 uses larger input resolution (518x518) compared to standard models"
+  }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "wasm-uppercase"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Minimal dependencies for WASM compilation

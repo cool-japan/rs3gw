@@ -1,0 +1,32 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rs3gw
+  namespace: rs3gw
+  labels:
+    app.kubernetes.io/name: rs3gw
+  annotations:
+    # Nginx ingress annotations
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # Uncomment for TLS
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: s3.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rs3gw
+                port:
+                  number: 9000
+  # Uncomment for TLS
+  # tls:
+  #   - hosts:
+  #       - s3.example.com
+  #     secretName: rs3gw-tls

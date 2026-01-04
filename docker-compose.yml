@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  rs3gw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rs3gw
+    ports:
+      - "9000:9000"
+    environment:
+      - RS3GW_BIND_ADDR=0.0.0.0:9000
+      - RS3GW_STORAGE_ROOT=/data
+      - RS3GW_DEFAULT_BUCKET=default
+      - RS3GW_COMPRESSION=zstd:3
+      # Uncomment to enable authentication
+      # - RS3GW_ACCESS_KEY=your-access-key
+      # - RS3GW_SECRET_KEY=your-secret-key
+      - RUST_LOG=info
+    volumes:
+      - rs3gw-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # Optional: Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    depends_on:
+      - rs3gw
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # Optional: Grafana for dashboards
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+volumes:
+  rs3gw-data:
+  prometheus-data:
+  grafana-data:

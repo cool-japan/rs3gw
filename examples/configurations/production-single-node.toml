@@ -1,0 +1,103 @@
+# rs3gw Production Configuration - Single Node
+# Optimized for single-server production deployment
+
+[server]
+bind_addr = "0.0.0.0:9000"
+request_timeout = 300
+max_concurrent = 1000  # Limit concurrent requests
+
+[tls]
+enabled = true
+cert_path = "/etc/rs3gw/certs/server.crt"
+key_path = "/etc/rs3gw/certs/server.key"
+
+[storage]
+root = "/var/lib/rs3gw/data"
+default_bucket = "default"
+compression = "zstd:3"  # Balanced compression
+
+[auth]
+# Production authentication - use strong credentials
+access_key = "${RS3GW_ACCESS_KEY}"  # Set via environment
+secret_key = "${RS3GW_SECRET_KEY}"  # Set via environment
+
+[cache]
+enabled = true
+max_size_mb = 2048  # 2GB cache
+max_objects = 100000
+ttl = 600  # 10 minutes
+
+[dedup]
+enabled = true
+block_size = 65536  # 64KB blocks
+algorithm = "content-defined"  # Better dedup ratio
+min_size = 131072  # 128KB minimum
+
+[zerocopy]
+direct_io = true
+direct_io_threshold = 1048576  # 1MB
+splice = true
+mmap = true
+
+[throttle]
+enabled = true
+rps = 10000  # 10k requests per second
+upload_mbps = 1000  # 1 Gbps
+download_mbps = 1000  # 1 Gbps
+
+[quota]
+enabled = true
+max_storage_gb = 1000  # 1TB per bucket default
+max_objects = 1000000  # 1M objects per bucket
+
+[logging]
+level = "info"
+format = "json"  # Machine-readable for log aggregation
+destination = "file"
+file_path = "/var/log/rs3gw/rs3gw.log"
+rotation_size_mb = 100
+rotation_count = 10
+
+[metrics]
+enabled = true
+prometheus_port = 9090
+
+[observability]
+profiling_enabled = true
+profiling_interval = 300  # 5 minutes
+profiling_pprof_export = true
+anomaly_detection_enabled = true
+anomaly_threshold_sigma = 3.0
+
+[audit]
+enabled = true
+log_path = "/var/log/rs3gw/audit.log"
+chain_verification = true
+forwarding_enabled = true
+forwarding_destinations = ["syslog://localhost:514"]
+
+[self_healing]
+enabled = true
+check_interval = 3600  # 1 hour
+repair_enabled = true
+max_concurrent_repairs = 5
+corruption_threshold = 0.01  # 1%
+auto_cleanup_enabled = true
+retention_days = 90
+
+[cluster]
+enabled = false  # Single node
+
+[backup]
+enabled = true
+snapshot_interval = 86400  # Daily
+retention_days = 30
+backup_path = "/var/lib/rs3gw/backups"
+
+# Production features
+[features]
+wasm_plugins = true
+video_transcoding = false  # Disable unless needed
+graphql = true
+websocket = true
+grpc = true

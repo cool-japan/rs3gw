@@ -1,0 +1,40 @@
+{
+  "id": "vit-base-preprocessing",
+  "name": "Vision Transformer (ViT-Base) Preprocessing",
+  "version": "1.0.0",
+  "description": "Vision Transformer (ViT) base model preprocessing pipeline",
+  "steps": [
+    {
+      "id": "resize",
+      "step_type": "image_resize",
+      "config": {
+        "width": 224,
+        "height": 224,
+        "mode": "fit",
+        "filter": "bicubic"
+      },
+      "cache_results": false,
+      "description": "Resize to 224x224 with bicubic interpolation (ViT-Base standard)"
+    },
+    {
+      "id": "normalize",
+      "step_type": "image_normalization",
+      "config": {
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.5, 0.5, 0.5],
+        "normalize_range": true
+      },
+      "cache_results": true,
+      "description": "Apply ViT normalization (normalizes to [-1, 1] range)"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "rs3gw-team",
+    "target_model": "Vision Transformer (ViT-Base/16, ViT-Base/32)",
+    "use_case": "Image classification, Transfer learning, Feature extraction",
+    "framework": "PyTorch/HuggingFace Transformers/JAX",
+    "reference": "https://github.com/google-research/vision_transformer",
+    "notes": "For ViT-Large (384x384), use width=384 and height=384 in resize config"
+  }
+}

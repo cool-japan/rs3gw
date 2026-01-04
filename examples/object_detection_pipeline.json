@@ -1,0 +1,40 @@
+{
+  "id": "object-detection-preprocessing",
+  "name": "Object Detection Preprocessing",
+  "version": "1.0.0",
+  "description": "Preprocessing pipeline for object detection models (YOLO, Faster R-CNN, etc.)",
+  "steps": [
+    {
+      "id": "resize",
+      "step_type": "image_resize",
+      "config": {
+        "width": 640,
+        "height": 640,
+        "mode": "fill",
+        "filter": "bilinear"
+      },
+      "cache_results": false,
+      "description": "Resize to 640x640 with padding for YOLO input"
+    },
+    {
+      "id": "normalize",
+      "step_type": "image_normalization",
+      "config": {
+        "mean": [0.0, 0.0, 0.0],
+        "std": [255.0, 255.0, 255.0],
+        "normalize_range": false
+      },
+      "cache_results": false,
+      "description": "Normalize pixel values to [0, 1] range for detection models"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "computer-vision-team",
+    "target_model": "YOLOv8/YOLOv9/Faster R-CNN",
+    "dataset": "COCO/Pascal VOC",
+    "use_case": "Real-time object detection",
+    "recommended_batch_size": 8,
+    "notes": "Optimized for YOLO models with 640x640 input size"
+  }
+}

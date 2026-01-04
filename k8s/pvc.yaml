@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rs3gw-data
+  namespace: rs3gw
+  labels:
+    app.kubernetes.io/name: rs3gw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  # Uncomment and set your storage class
+  # storageClassName: standard

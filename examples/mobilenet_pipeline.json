@@ -1,0 +1,40 @@
+{
+  "id": "mobilenet-v2-preprocessing",
+  "name": "MobileNetV2 Preprocessing",
+  "version": "1.0.0",
+  "description": "MobileNetV2 preprocessing pipeline for efficient mobile and edge deployment",
+  "steps": [
+    {
+      "id": "resize",
+      "step_type": "image_resize",
+      "config": {
+        "width": 224,
+        "height": 224,
+        "mode": "fit",
+        "filter": "bilinear"
+      },
+      "cache_results": false,
+      "description": "Resize to 224x224 with bilinear interpolation (MobileNet standard)"
+    },
+    {
+      "id": "normalize",
+      "step_type": "image_normalization",
+      "config": {
+        "mean": [0.485, 0.456, 0.406],
+        "std": [0.229, 0.224, 0.225],
+        "normalize_range": true
+      },
+      "cache_results": true,
+      "description": "Apply ImageNet normalization (MobileNet uses standard ImageNet stats)"
+    }
+  ],
+  "metadata": {
+    "created_at": "2025-12-31T00:00:00Z",
+    "author": "rs3gw-team",
+    "target_model": "MobileNetV1, MobileNetV2, MobileNetV3",
+    "use_case": "Mobile applications, Edge devices, Real-time inference, IoT",
+    "framework": "PyTorch/TensorFlow/TensorFlow Lite/CoreML",
+    "reference": "https://github.com/tensorflow/models/tree/master/research/slim/nets/mobilenet",
+    "notes": "MobileNet is optimized for mobile and edge devices with minimal computational cost"
+  }
+}
