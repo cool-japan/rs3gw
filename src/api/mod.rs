@@ -3,6 +3,7 @@
 //! This module implements the S3-compatible REST API.
 
 pub mod arrow_flight;
+pub mod auth_middleware;
 // Disabled: arrow_flight_sql needs API updates (moved to .bak)
 // pub mod arrow_flight_sql;
 pub mod batch;

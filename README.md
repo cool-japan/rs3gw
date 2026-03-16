@@ -85,7 +85,7 @@ rs3gw (Rust S3 Gateway) is an ultra-high-performance, enterprise-grade object st
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-## 🎯 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -93,19 +93,25 @@ rs3gw (Rust S3 Gateway) is an ultra-high-performance, enterprise-grade object st
 - Linux, macOS, or Windows (WSL2)
 - (Optional) Docker and Docker Compose
 
-### Installation
+### Quick Start (Local Development)
 
 ```bash
-# Clone the repository
+# Clone and build
 git clone https://github.com/cool-japan/rs3gw.git
 cd rs3gw
-
-# Build release binary (optimized)
 cargo build --release
 
-# Run the server
+# Run with default settings (binds to 0.0.0.0:9000, stores in ./data)
+./target/release/rs3gw
+
+# Run with custom settings
+RS3GW_BIND_ADDR=0.0.0.0:9000 \
+RS3GW_STORAGE_ROOT=./data \
+RS3GW_COMPRESSION=zstd \
 ./target/release/rs3gw
 ```
+
+The server is now accessible at `http://localhost:9000`. You can immediately use it with any S3 client (boto3, AWS CLI, etc.).
 
 ### Docker Compose (Recommended for Development)
 
@@ -134,56 +140,54 @@ rs3gw supports both TOML configuration files and environment variables:
 **Essential Configuration:**
 
 ```bash
-export RS3GW_BIND_ADDR="0.0.0.0:9000"
-export RS3GW_STORAGE_ROOT="./data"
-export RS3GW_ACCESS_KEY="minioadmin"
-export RS3GW_SECRET_KEY="minioadmin"
-export RS3GW_COMPRESSION="zstd:3"
-export RS3GW_CACHE_ENABLED="true"
-export RS3GW_DEDUP_ENABLED="true"
+export RS3GW_BIND_ADDR="0.0.0.0:9000"      # Listen address (default: 0.0.0.0:9000)
+export RS3GW_STORAGE_ROOT="./data"           # Storage directory (default: ./data)
+export RS3GW_ACCESS_KEY="minioadmin"         # Access key (empty = no auth)
+export RS3GW_SECRET_KEY="minioadmin"         # Secret key (empty = no auth)
+export RS3GW_COMPRESSION="zstd:3"            # Compression: none, zstd, zstd:N, lz4, gzip
+export RS3GW_CACHE_ENABLED="true"            # Enable object caching
+export RS3GW_DEDUP_ENABLED="true"            # Enable block-level deduplication
+export RS3GW_REQUEST_TIMEOUT="300"           # Request timeout in seconds (0 = no timeout)
+export RS3GW_MAX_CONCURRENT="0"              # Max concurrent requests (0 = unlimited)
+export RS3GW_REGION="us-east-1"              # Default region
 ```
 
-## 📚 Usage Examples
-
-### AWS CLI
-
-```bash
-# Configure endpoint
-aws configure set default.s3.endpoint_url http://localhost:9000
-
-# Create bucket and upload
-aws s3 mb s3://my-bucket
-aws s3 cp myfile.txt s3://my-bucket/
-
-# S3 Select query (SQL on CSV/JSON/Parquet)
-aws s3api select-object-content \
-  --bucket my-bucket \
-  --key data.csv \
-  --expression "SELECT * FROM S3Object WHERE age > 30" \
-  --expression-type SQL \
-  --input-serialization '{"CSV": {"FileHeaderInfo": "USE"}}' \
-  --output-serialization '{"CSV": {}}' \
-  output.csv
-```
+## Usage Examples
 
 ### Python (boto3)
 
 ```python
 import boto3
 
-s3 = boto3.client(
-    's3',
+s3 = boto3.client('s3',
     endpoint_url='http://localhost:9000',
     aws_access_key_id='minioadmin',
     aws_secret_access_key='minioadmin',
-    region_name='us-east-1'
+    region_name='us-east-1',
 )
 
-# Basic operations
+# Create bucket
 s3.create_bucket(Bucket='my-bucket')
-s3.upload_file('local.txt', 'my-bucket', 'remote.txt')
 
-# S3 Select
+# Upload object
+s3.put_object(Bucket='my-bucket', Key='hello.txt', Body=b'Hello, World!')
+
+# Download object
+response = s3.get_object(Bucket='my-bucket', Key='hello.txt')
+print(response['Body'].read())
+
+# List objects
+for obj in s3.list_objects_v2(Bucket='my-bucket').get('Contents', []):
+    print(f"  {obj['Key']} ({obj['Size']} bytes)")
+
+# Delete object
+s3.delete_object(Bucket='my-bucket', Key='hello.txt')
+```
+
+**Advanced boto3 usage (S3 Select, multipart uploads):**
+
+```python
+# S3 Select - SQL queries on stored data
 response = s3.select_object_content(
     Bucket='my-bucket',
     Key='data.csv',
@@ -208,6 +212,35 @@ s3.complete_multipart_upload(
     UploadId=mpu['UploadId'],
     MultipartUpload={'Parts': parts}
 )
+```
+
+### AWS CLI
+
+```bash
+# Create a bucket
+aws --endpoint-url http://localhost:9000 s3 mb s3://my-bucket
+
+# Upload a file
+aws --endpoint-url http://localhost:9000 s3 cp myfile.txt s3://my-bucket/
+
+# List bucket contents
+aws --endpoint-url http://localhost:9000 s3 ls s3://my-bucket/
+
+# Download a file
+aws --endpoint-url http://localhost:9000 s3 cp s3://my-bucket/myfile.txt downloaded.txt
+
+# Recursive copy
+aws --endpoint-url http://localhost:9000 s3 cp ./local-dir/ s3://my-bucket/prefix/ --recursive
+
+# S3 Select query (SQL on CSV/JSON/Parquet)
+aws --endpoint-url http://localhost:9000 s3api select-object-content \
+  --bucket my-bucket \
+  --key data.csv \
+  --expression "SELECT * FROM S3Object WHERE age > 30" \
+  --expression-type SQL \
+  --input-serialization '{"CSV": {"FileHeaderInfo": "USE"}}' \
+  --output-serialization '{"CSV": {}}' \
+  output.csv
 ```
 
 ### gRPC (High-Performance Binary Protocol)
@@ -454,47 +487,132 @@ cargo run --bin s3-migrate -- verify \
   --dest-bucket dest-bucket
 ```
 
-## 📊 Supported S3 Operations
+## API Compatibility Table
 
-### Bucket Operations (26 operations)
-- ✅ ListBuckets, CreateBucket, DeleteBucket, HeadBucket
-- ✅ GetBucketLocation, GetBucketVersioning, PutBucketVersioning
-- ✅ GetBucketTagging, PutBucketTagging, DeleteBucketTagging
-- ✅ GetBucketPolicy, PutBucketPolicy, DeleteBucketPolicy
-- ✅ GetBucketCors, PutBucketCors, DeleteBucketCors
-- ✅ GetBucketEncryption, PutBucketEncryption, DeleteBucketEncryption
-- ✅ GetBucketLifecycleConfiguration, PutBucketLifecycleConfiguration
-- ✅ GetBucketReplication, PutBucketReplication
-- ✅ GetBucketNotificationConfiguration, PutBucketNotificationConfiguration
-- ✅ GetPublicAccessBlock, PutPublicAccessBlock
+### Bucket Operations
 
-### Object Operations (40+ operations)
-- ✅ ListObjectsV1, ListObjectsV2, ListObjectVersions
-- ✅ GetObject, PutObject, DeleteObject, DeleteObjects
-- ✅ HeadObject, CopyObject, GetObjectAttributes
-- ✅ GetObjectTagging, PutObjectTagging, DeleteObjectTagging
-- ✅ GetObjectAcl, PutObjectAcl
-- ✅ PostObject (browser upload)
-- ✅ SelectObjectContent (S3 Select with SQL)
-- ✅ Range requests, Conditional headers
-- ✅ Object Lock (GetObjectRetention, PutObjectRetention, GetObjectLegalHold, PutObjectLegalHold)
+| API | Status | Notes |
+|-----|--------|-------|
+| ListBuckets | Full | XML response with owner info |
+| CreateBucket | Full | With location constraint |
+| DeleteBucket | Full | Fails if non-empty |
+| HeadBucket | Full | Existence check |
+| GetBucketLocation | Full | Returns configured region |
+| GetBucketVersioning | Full | Enabled/Suspended states |
+| PutBucketVersioning | Full | Toggle versioning |
+| GetBucketTagging | Full | XML tag set |
+| PutBucketTagging | Full | XML tag set |
+| DeleteBucketTagging | Full | Removes all tags |
+| GetBucketPolicy | Full | JSON policy document |
+| PutBucketPolicy | Full | JSON policy document |
+| DeleteBucketPolicy | Full | Removes policy |
+| GetBucketAcl | Full | Returns owner + ACL |
+| PutBucketAcl | Stub | Accepted but not enforced |
+| GetBucketEncryption | Stub | Returns not-found |
+| PutBucketEncryption | Stub | Accepted, no-op |
+| DeleteBucketEncryption | Stub | No-op |
+| GetBucketLifecycleConfiguration | Stub | Returns not-found |
+| PutBucketLifecycleConfiguration | Stub | Accepted, rules not executed |
+| DeleteBucketLifecycleConfiguration | Stub | No-op |
+| GetBucketCors | Stub | Returns not-found |
+| PutBucketCors | Stub | Accepted, no-op |
+| DeleteBucketCors | Stub | No-op |
+| GetBucketNotificationConfiguration | Stub | Returns empty config |
+| PutBucketNotificationConfiguration | Stub | Accepted, no-op |
+| GetBucketLogging | Stub | Returns empty config |
+| PutBucketLogging | Stub | Accepted, no-op |
+| GetBucketRequestPayment | Stub | Returns BucketOwner |
+| PutBucketRequestPayment | Stub | Accepted, no-op |
+| GetBucketWebsite | Stub | Returns not-found |
+| PutBucketWebsite | Stub | Accepted, no-op |
+| DeleteBucketWebsite | Stub | No-op |
+| GetBucketReplication | Stub | Returns not-found |
+| PutBucketReplication | Stub | Accepted, no replication |
+| DeleteBucketReplication | Stub | No-op |
+| GetBucketAccelerateConfiguration | Stub | Returns Suspended |
+| PutBucketAccelerateConfiguration | Stub | Accepted, no-op |
+| GetBucketOwnershipControls | Stub | Returns BucketOwnerEnforced |
+| PutBucketOwnershipControls | Stub | Accepted, no-op |
+| DeleteBucketOwnershipControls | Stub | No-op |
+| GetPublicAccessBlock | Stub | Returns all-blocked |
+| PutPublicAccessBlock | Stub | Accepted, no-op |
+| DeletePublicAccessBlock | Stub | No-op |
+| GetObjectLockConfiguration | Stub | Returns not-found |
+| PutObjectLockConfiguration | Stub | Returns conflict error |
+| GetBucketIntelligentTieringConfiguration | Stub | Returns not-found |
+| PutBucketIntelligentTieringConfiguration | Stub | Accepted, no-op |
+| DeleteBucketIntelligentTieringConfiguration | Stub | No-op |
+| Get/Put/Delete BucketMetricsConfiguration | Stub | Accepted, no-op |
+| Get/Put/Delete BucketAnalyticsConfiguration | Stub | Accepted, no-op |
+| Get/Put/Delete BucketInventoryConfiguration | Stub | Accepted, no-op |
 
-### Multipart Upload (7 operations)
-- ✅ CreateMultipartUpload
-- ✅ UploadPart, UploadPartCopy
-- ✅ CompleteMultipartUpload
-- ✅ AbortMultipartUpload
-- ✅ ListParts, ListMultipartUploads
+### Object Operations
 
-### Advanced Features
-- ✅ **S3 Select**: SQL queries on CSV, JSON, Parquet, Avro, ORC, Protobuf, MessagePack
-  - Aggregations: SUM, AVG, COUNT, MIN, MAX
-  - GROUP BY, ORDER BY, LIMIT
-  - Column pruning and predicate pushdown for Parquet
-  - Query plan caching
-- ✅ **Presigned URLs**: Temporary access URLs with expiration
-- ✅ **Server-Side Encryption**: SSE-S3, SSE-C with AES-256-GCM
-- ✅ **Checksums**: CRC32C, CRC32, SHA256, SHA1, MD5 validation
+| API | Status | Notes |
+|-----|--------|-------|
+| GetObject | Full | Range support, conditional headers, streaming |
+| PutObject | Full | Streaming upload, checksums, metadata |
+| DeleteObject | Full | With version ID support |
+| DeleteObjects | Full | Batch delete (multi-object) |
+| HeadObject | Full | Metadata without body |
+| CopyObject | Full | Server-side copy with metadata |
+| ListObjectsV1 | Full | Prefix, delimiter, marker |
+| ListObjectsV2 | Full | ContinuationToken, StartAfter |
+| ListObjectVersions | Full | Version listing |
+| GetObjectTagging | Full | XML tag set |
+| PutObjectTagging | Full | XML tag set |
+| DeleteObjectTagging | Full | Removes all tags |
+| GetObjectAcl | Full | Returns owner + ACL |
+| PutObjectAcl | Stub | Accepted, not enforced |
+| GetObjectAttributes | Full | ETag, size, parts |
+| PostObject | Full | Browser-based upload |
+| RestoreObject | Stub | Accepted, no-op (no Glacier) |
+| SelectObjectContent | Full | SQL on CSV/JSON/Parquet/Avro/ORC |
+| GetObjectRetention | Stub | Returns Object Lock error |
+| PutObjectRetention | Stub | Returns Object Lock error |
+| GetObjectLegalHold | Stub | Returns Object Lock error |
+| PutObjectLegalHold | Stub | Returns Object Lock error |
+| GetObjectTorrent | Stub | Returns NotImplemented |
+| WriteGetObjectResponse | Stub | Returns NotImplemented |
+
+### Multipart Upload Operations
+
+| API | Status | Notes |
+|-----|--------|-------|
+| CreateMultipartUpload | Full | Returns UploadId |
+| UploadPart | Full | Part number + upload ID |
+| UploadPartCopy | Full | Copy from existing object |
+| CompleteMultipartUpload | Full | Assembles parts, validates ETags |
+| AbortMultipartUpload | Full | Cleans up parts |
+| ListParts | Full | Pagination support |
+| ListMultipartUploads | Full | Prefix, delimiter filtering |
+
+### S3 Select (SQL Query Engine)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| CSV input/output | Full | FileHeaderInfo, field delimiters |
+| JSON input/output | Full | DOCUMENT and LINES types |
+| Parquet input | Full | Column pruning, predicate pushdown |
+| Avro input | Full | Schema-aware queries |
+| ORC input | Full | Columnar format support |
+| Protobuf input | Full | Binary format support |
+| MessagePack input | Full | Binary format support |
+| Aggregations | Full | SUM, AVG, COUNT, MIN, MAX |
+| GROUP BY / ORDER BY | Full | With LIMIT |
+| Query plan caching | Full | Configurable TTL and memory limits |
+
+### Additional Protocols
+
+| Protocol | Status | Notes |
+|----------|--------|-------|
+| gRPC | Full | 40+ operations via tonic |
+| GraphQL | Full | Queries and mutations |
+| WebSocket | Full | Real-time event streaming |
+| Arrow Flight | Full | High-performance columnar data transfer |
+| Presigned URLs | Full | Temporary access with expiration |
+| Server-Side Encryption | Full | SSE-S3, SSE-C with AES-256-GCM |
+| Checksums | Full | CRC32C, CRC32, SHA256, SHA1, MD5 |
 
 ## 🔧 Advanced Configuration
 
@@ -544,18 +662,36 @@ export RS3GW_REPLICATION_MODE=quorum
 export RS3GW_REPLICATION_FACTOR=3
 ```
 
-### Observability
+### Observability and OpenTelemetry
+
+rs3gw supports OpenTelemetry-based distributed tracing via standard OTEL environment variables. Traces are exported over OTLP (gRPC) to any compatible collector (Jaeger, Tempo, Grafana Alloy, etc.).
 
 ```bash
 # OpenTelemetry distributed tracing
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
-export OTEL_TRACES_SAMPLER=traceidratio
-export OTEL_TRACES_SAMPLER_ARG=0.1
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317    # OTLP collector endpoint (gRPC)
+export OTEL_TRACES_SAMPLER=traceidratio                   # Sampling strategy
+export OTEL_TRACES_SAMPLER_ARG=0.1                        # Sample 10% of traces
+export OTEL_TRACES_EXPORTER=otlp                          # Exporter type (otlp or none)
+export OTEL_SERVICE_NAME=rs3gw                            # Service name in traces
+export OTEL_RESOURCE_ATTRIBUTES=deployment.env=prod       # Additional resource attributes
 
 # Profiling
 export RS3GW_PROFILING_ENABLED=true
 export RS3GW_PROFILING_INTERVAL_SECS=60
 ```
+
+**OpenTelemetry Environment Variables Reference:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (none) | OTLP gRPC endpoint URL |
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | Sampling strategy |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampler argument (ratio for `traceidratio`) |
+| `OTEL_TRACES_EXPORTER` | `otlp` | Exporter type (`otlp` or `none` to disable) |
+| `OTEL_SERVICE_NAME` | `rs3gw` | Service name in trace spans |
+| `OTEL_RESOURCE_ATTRIBUTES` | (none) | Comma-separated key=value resource attributes |
+
+**Prometheus Metrics** are served at `GET /metrics` and include 30+ metric families covering request latency, throughput, object sizes, cache hit rates, compression ratios, dedup savings, cluster health, and more.
 
 ## 🎨 Object Transformations
 
@@ -694,7 +830,7 @@ cargo bench --bench compression_benchmarks
 ## 🧪 Testing
 
 ```bash
-# Run all 392 tests (305 unit + 67 integration)
+# Run all tests
 cargo nextest run --all-features
 
 # Run integration tests only
@@ -769,7 +905,7 @@ Rs3gw is fully compliant with the [SCIRS2 (Scientific Rust) ecosystem](https://g
 - ✅ **No Unwrap**: All errors properly handled with Result types
 - ✅ **SciRS2 Integration**: Uses scirs2-core for RNG and scirs2-io for storage
 - ✅ **Workspace Structure**: Proper Cargo workspace with shared dependencies
-- ✅ **File Size Limits**: All files under 2,000 lines (largest: 1,828 lines)
+- ✅ **File Size Limits**: All files under 2,000 lines
 - ✅ **Latest Crates**: Dependencies kept up-to-date with crates.io
 - ✅ **Code Formatting**: cargo fmt enforced on all code
 
@@ -791,7 +927,7 @@ Verify policy compliance:
 # Individual checks
 cargo build --all-features  # No warnings
 cargo clippy --all-targets  # No clippy warnings
-cargo nextest run           # All tests pass (550/550)
+cargo nextest run           # All tests pass
 ```
 
 For detailed policy information, see [SCIRS2_POLICY.md](SCIRS2_POLICY.md).
@@ -808,12 +944,14 @@ We welcome contributions! Please see our development process:
 6. Keep files under 2000 lines (use splitrs if needed)
 7. Submit a pull request
 
-## 📊 Project Statistics
+## Project Summary
 
+- **Version**: 0.2.0 (2026-03-16)
 - **Language**: Rust (100% Pure Rust default features)
-- **Lines of Code**: ~52,559 code lines (63,662 total including comments and blanks)
-- **Test Coverage**: 550 comprehensive tests (100% passing)
-- **Modules**: 134 Rust files
+- **Lines of Code**: ~69,137 Rust SLoC (74,667 total across all languages)
+- **Modules**: 193 Rust files across 300 total files
+- **Tests**: 874 tests (865 lib + integration, 9 doc tests), 0 failures
+- **Quality**: 0 clippy warnings, 0 rustdoc errors
 - **Dependencies**: Carefully selected for performance and security (all up-to-date)
 - **Policy Compliance**: 100% SCIRS2 compliant
 
@@ -835,12 +973,47 @@ Choose the license that best fits your use case.
 - [Tonic](https://github.com/hyperium/tonic) - gRPC framework
 - [Apache Arrow](https://arrow.apache.org/) - Columnar data format
 
+## Known Limitations
+
+The following are known gaps in the current release (0.2.0). They are documented here to set accurate expectations for production deployments.
+
+- **SigV4 chunked streaming HMAC**: Per-chunk HMAC verification for `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and `UNSIGNED-PAYLOAD` is not implemented. The request body is accepted when these payload types are declared; only the canonical request signature is verified. Full per-chunk HMAC is planned for a future release.
+- **Object Lock / WORM**: Object Lock API endpoints (`GetObjectRetention`, `PutObjectRetention`, `GetObjectLegalHold`, `PutObjectLegalHold`) are registered but return "Object Lock must be enabled" errors. Retention and legal-hold constraints are not enforced.
+- **S3 Lifecycle rule execution**: `PutBucketLifecycleConfiguration` and `GetBucketLifecycleConfiguration` accept and return lifecycle rules, but the rules are not executed. Expiration, transition, and abort-multipart-upload actions are not triggered automatically.
+- **Bucket configuration stubs**: Many bucket configuration APIs (encryption, CORS, notification, logging, request payment, website, accelerate, ownership controls, public access block, intelligent tiering, metrics, analytics, inventory) accept PUT requests without error but do not persist or enforce the configuration. GET requests return default/empty responses.
+- **Cross-region replication execution**: `PutBucketReplication` stores replication configuration and `GetBucketReplication` returns it, but object transfers to remote destinations are not implemented in this release.
+- **Filesystem-only storage backend**: The storage engine writes objects to the local filesystem. Cloud-backed storage (AWS S3, GCS, Azure Blob, MinIO) is listed in the architecture diagram as a future target but is not available in this release.
+- **gRPC TLS requires manual cert provisioning**: Enabling TLS for the gRPC server requires manually providing a certificate and key via `RS3GW_GRPC_TLS_CERT` / `RS3GW_GRPC_TLS_KEY`. Automatic TLS (e.g. ACME/Let's Encrypt) is not supported.
+- **Cluster / gossip synchronization not implemented**: `RS3GW_CLUSTER_ENABLED=true` parses cluster configuration and initialises the replication manager, but inter-node gossip and data synchronization are not yet implemented. All nodes operate independently.
+- **Lambda Object Lambda**: `WriteGetObjectResponse` returns NotImplemented. Lambda integration is not supported.
+- **BitTorrent**: `GetObjectTorrent` returns NotImplemented.
+
+---
+
 ## 🔗 Links
 
 - [GitHub Repository](https://github.com/cool-japan/rs3gw)
 - [Issue Tracker](https://github.com/cool-japan/rs3gw/issues)
 - [API Documentation](https://docs.rs/rs3gw)
 - [scirs2-io](https://docs.rs/scirs2-io)
+
+## Project Statistics
+
+Measured with `tokei` on 2026-03-16 (branch `0.2.0`):
+
+| Language     | Files | Code Lines | Comment Lines | Blank Lines |
+|--------------|------:|----------:|-------------:|------------:|
+| Rust         |   193 |    69,137  |        3,350 |      10,020 |
+| Protobuf     |     4 |       459  |           40 |         103 |
+| Python       |     6 |     1,422  |          112 |         284 |
+| Shell        |     4 |       310  |           59 |          79 |
+| TOML         |    11 |       784  |          170 |         207 |
+| YAML         |    27 |       907  |          101 |          55 |
+| **Total**    | **300** | **74,667** |      **10,818** |     **13,355** |
+
+**Estimated development cost**: $2,502,803 (COCOMO model, 74,667 SLoC)
+
+The project is 100% Pure Rust for production code (no C/Fortran/unsafe FFI in default features).
 
 ---
 

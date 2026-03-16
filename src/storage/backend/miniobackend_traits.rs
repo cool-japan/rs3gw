@@ -124,6 +124,7 @@ impl StorageBackend for MinIOBackend {
                         .unwrap_or_else(chrono::Utc::now),
                     content_type: "application/octet-stream".to_string(),
                     metadata: HashMap::new(),
+                    schema_version: 1,
                 };
                 Some((key, meta))
             })
@@ -174,6 +175,7 @@ impl StorageBackend for MinIOBackend {
                 .unwrap_or("application/octet-stream")
                 .to_string(),
             metadata,
+            schema_version: 1,
         })
     }
     async fn get_object(
@@ -213,6 +215,7 @@ impl StorageBackend for MinIOBackend {
                 .unwrap_or("application/octet-stream")
                 .to_string(),
             metadata,
+            schema_version: 1,
         };
         let body = output.body.collect().await.map_err(|e| {
             StorageError::Internal(format!("MinIO get_object body read failed: {}", e))
@@ -256,6 +259,7 @@ impl StorageBackend for MinIOBackend {
                 .unwrap_or("application/octet-stream")
                 .to_string(),
             metadata,
+            schema_version: 1,
         };
         use futures::stream;
         let bytes_result = output.body.collect().await.map_err(|e| {
@@ -289,6 +293,7 @@ impl StorageBackend for MinIOBackend {
             last_modified: chrono::Utc::now(),
             content_type: "application/octet-stream".to_string(),
             metadata,
+            schema_version: 1,
         })
     }
     async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
@@ -345,6 +350,7 @@ impl StorageBackend for MinIOBackend {
                 .unwrap_or_else(chrono::Utc::now),
             content_type: head_output.content_type,
             metadata: metadata.unwrap_or_default(),
+            schema_version: 1,
         })
     }
     async fn create_multipart_upload(
@@ -427,6 +433,7 @@ impl StorageBackend for MinIOBackend {
             last_modified: chrono::Utc::now(),
             content_type: meta.content_type,
             metadata: meta.metadata,
+            schema_version: 1,
         })
     }
     async fn abort_multipart_upload(

@@ -15,454 +15,24 @@
 // - ComplianceReporter: Report generation for compliance frameworks
 // - LogForwarder: External log forwarding (SIEM, syslog, S3)
 
-use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
-use sha2::Sha256;
-use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+pub mod config;
+pub mod filter;
+pub mod forwarding;
+pub mod security;
+mod types;
+
+pub use config::{AuditConfig, AuditConfigBuilder};
+pub use filter::AuditFilter;
+pub use forwarding::{ForwardDestination, SyslogProtocol};
+pub use security::{SecurityEvent, SecurityEventDetector};
+pub use types::{AuditAction, AuditError, AuditEvent, AuditOutcome, AuditResult, SecuritySeverity};
+
+use std::path::Path;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
-
-type HmacSha256 = Hmac<Sha256>;
-
-/// Errors that can occur during audit logging
-#[derive(Debug, Error)]
-pub enum AuditError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
-
-    #[error("Chain integrity violation: {0}")]
-    ChainIntegrity(String),
-
-    #[error("Invalid event: {0}")]
-    InvalidEvent(String),
-
-    #[error("HMAC error: {0}")]
-    Hmac(String),
-
-    #[error("Forwarding error: {0}")]
-    Forwarding(String),
-}
-
-pub type AuditResult<T> = Result<T, AuditError>;
-
-/// Action types in the audit log
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AuditAction {
-    // Bucket operations
-    CreateBucket,
-    DeleteBucket,
-    ListBuckets,
-    GetBucketPolicy,
-    PutBucketPolicy,
-    DeleteBucketPolicy,
-
-    // Object operations
-    GetObject,
-    PutObject,
-    DeleteObject,
-    DeleteObjects,
-    CopyObject,
-    ListObjects,
-    HeadObject,
-
-    // Multipart operations
-    CreateMultipartUpload,
-    UploadPart,
-    CompleteMultipartUpload,
-    AbortMultipartUpload,
-
-    // Authentication
-    AuthSuccess,
-    AuthFailure,
-
-    // Admin operations
-    UpdateConfig,
-    ViewAuditLogs,
-    ModifyPermissions,
-
-    // Security events
-    PrivilegeEscalation,
-    UnauthorizedAccess,
-    SuspiciousActivity,
-
-    // Other
-    Custom(String),
-}
-
-impl std::fmt::Display for AuditAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Custom(s) => write!(f, "{}", s),
-            _ => write!(f, "{:?}", self),
-        }
-    }
-}
-
-/// Outcome of an operation
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum AuditOutcome {
-    Success,
-    Failure,
-    Denied,
-}
-
-impl std::fmt::Display for AuditOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Success => write!(f, "success"),
-            Self::Failure => write!(f, "failure"),
-            Self::Denied => write!(f, "denied"),
-        }
-    }
-}
-
-/// Security event severity levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "lowercase")]
-pub enum SecuritySeverity {
-    Info,
-    Low,
-    Medium,
-    High,
-    Critical,
-}
-
-/// Individual audit event
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEvent {
-    /// Unique event ID (UUID)
-    pub event_id: String,
-
-    /// Timestamp (ISO 8601)
-    pub timestamp: DateTime<Utc>,
-
-    /// Actor (user ID, API key, or "anonymous")
-    pub actor: String,
-
-    /// Source IP address
-    pub source_ip: Option<String>,
-
-    /// Action performed
-    pub action: AuditAction,
-
-    /// Resource accessed (bucket/key path)
-    pub resource: String,
-
-    /// Outcome of the operation
-    pub outcome: AuditOutcome,
-
-    /// HTTP status code (if applicable)
-    pub status_code: Option<u16>,
-
-    /// Error message (if failure)
-    pub error_message: Option<String>,
-
-    /// Request ID for correlation
-    pub request_id: Option<String>,
-
-    /// Session ID for correlation
-    pub session_id: Option<String>,
-
-    /// User agent string
-    pub user_agent: Option<String>,
-
-    /// Additional metadata (key-value pairs)
-    #[serde(default)]
-    pub metadata: HashMap<String, String>,
-
-    /// Previous event hash (for chain integrity)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prev_hash: Option<String>,
-
-    /// Current event hash (HMAC-SHA256 of all fields)
-    #[serde(skip)]
-    pub current_hash: Option<String>,
-}
-
-impl AuditEvent {
-    /// Create a new audit event
-    pub fn new(
-        actor: String,
-        action: AuditAction,
-        resource: String,
-        outcome: AuditOutcome,
-    ) -> Self {
-        Self {
-            event_id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            actor,
-            source_ip: None,
-            action,
-            resource,
-            outcome,
-            status_code: None,
-            error_message: None,
-            request_id: None,
-            session_id: None,
-            user_agent: None,
-            metadata: HashMap::new(),
-            prev_hash: None,
-            current_hash: None,
-        }
-    }
-
-    /// Set source IP address
-    pub fn with_source_ip(mut self, ip: String) -> Self {
-        self.source_ip = Some(ip);
-        self
-    }
-
-    /// Set status code
-    pub fn with_status_code(mut self, code: u16) -> Self {
-        self.status_code = Some(code);
-        self
-    }
-
-    /// Set error message
-    pub fn with_error(mut self, message: String) -> Self {
-        self.error_message = Some(message);
-        self
-    }
-
-    /// Set request ID
-    pub fn with_request_id(mut self, id: String) -> Self {
-        self.request_id = Some(id);
-        self
-    }
-
-    /// Set session ID
-    pub fn with_session_id(mut self, id: String) -> Self {
-        self.session_id = Some(id);
-        self
-    }
-
-    /// Set user agent
-    pub fn with_user_agent(mut self, ua: String) -> Self {
-        self.user_agent = Some(ua);
-        self
-    }
-
-    /// Add metadata key-value pair
-    pub fn with_metadata(mut self, key: String, value: String) -> Self {
-        self.metadata.insert(key, value);
-        self
-    }
-
-    /// Set previous hash for chain integrity
-    pub fn with_prev_hash(mut self, hash: String) -> Self {
-        self.prev_hash = Some(hash);
-        self
-    }
-
-    /// Compute HMAC-SHA256 hash of this event
-    pub fn compute_hash(&self, secret: &[u8]) -> AuditResult<String> {
-        let mut mac =
-            HmacSha256::new_from_slice(secret).map_err(|e| AuditError::Hmac(e.to_string()))?;
-
-        // Include all fields in the hash (except current_hash itself)
-        mac.update(self.event_id.as_bytes());
-        mac.update(self.timestamp.to_rfc3339().as_bytes());
-        mac.update(self.actor.as_bytes());
-        if let Some(ip) = &self.source_ip {
-            mac.update(ip.as_bytes());
-        }
-        let action_str = serde_json::to_string(&self.action)?;
-        mac.update(action_str.as_bytes());
-        mac.update(self.resource.as_bytes());
-        let outcome_str = serde_json::to_string(&self.outcome)?;
-        mac.update(outcome_str.as_bytes());
-        if let Some(code) = self.status_code {
-            mac.update(&code.to_be_bytes());
-        }
-        if let Some(prev) = &self.prev_hash {
-            mac.update(prev.as_bytes());
-        }
-
-        let result = mac.finalize();
-        Ok(hex::encode(result.into_bytes()))
-    }
-
-    /// Verify this event's hash
-    pub fn verify_hash(&self, secret: &[u8]) -> AuditResult<bool> {
-        if let Some(stored_hash) = &self.current_hash {
-            let computed_hash = self.compute_hash(secret)?;
-            Ok(stored_hash == &computed_hash)
-        } else {
-            Ok(false)
-        }
-    }
-}
-
-/// Configuration for audit logger
-#[derive(Debug, Clone)]
-pub struct AuditConfig {
-    /// Path to audit log file
-    pub log_path: PathBuf,
-
-    /// HMAC secret for chain integrity
-    pub hmac_secret: Vec<u8>,
-
-    /// Enable real-time security event detection
-    pub enable_security_detection: bool,
-
-    /// Maximum log file size before rotation (bytes)
-    pub max_file_size: u64,
-
-    /// Maximum number of rotated files to keep
-    pub max_rotated_files: usize,
-
-    /// Enable log forwarding
-    pub enable_forwarding: bool,
-
-    /// Log forwarding destinations
-    pub forward_destinations: Vec<ForwardDestination>,
-
-    /// Enable compression for rotated logs
-    pub compress_rotated: bool,
-}
-
-impl Default for AuditConfig {
-    fn default() -> Self {
-        Self {
-            log_path: PathBuf::from("./audit/audit.log"),
-            hmac_secret: b"change-me-in-production".to_vec(),
-            enable_security_detection: true,
-            max_file_size: 100 * 1024 * 1024, // 100 MB
-            max_rotated_files: 10,
-            enable_forwarding: false,
-            forward_destinations: Vec::new(),
-            compress_rotated: true,
-        }
-    }
-}
-
-impl AuditConfig {
-    pub fn builder() -> AuditConfigBuilder {
-        AuditConfigBuilder::default()
-    }
-}
-
-/// Builder for AuditConfig
-#[derive(Debug, Default)]
-pub struct AuditConfigBuilder {
-    log_path: Option<PathBuf>,
-    hmac_secret: Option<Vec<u8>>,
-    enable_security_detection: Option<bool>,
-    max_file_size: Option<u64>,
-    max_rotated_files: Option<usize>,
-    enable_forwarding: Option<bool>,
-    forward_destinations: Vec<ForwardDestination>,
-    compress_rotated: Option<bool>,
-}
-
-impl AuditConfigBuilder {
-    pub fn log_path(mut self, path: PathBuf) -> Self {
-        self.log_path = Some(path);
-        self
-    }
-
-    pub fn hmac_secret(mut self, secret: Vec<u8>) -> Self {
-        self.hmac_secret = Some(secret);
-        self
-    }
-
-    pub fn enable_security_detection(mut self, enable: bool) -> Self {
-        self.enable_security_detection = Some(enable);
-        self
-    }
-
-    pub fn max_file_size(mut self, size: u64) -> Self {
-        self.max_file_size = Some(size);
-        self
-    }
-
-    pub fn max_rotated_files(mut self, count: usize) -> Self {
-        self.max_rotated_files = Some(count);
-        self
-    }
-
-    pub fn enable_forwarding(mut self, enable: bool) -> Self {
-        self.enable_forwarding = Some(enable);
-        self
-    }
-
-    pub fn add_forward_destination(mut self, dest: ForwardDestination) -> Self {
-        self.forward_destinations.push(dest);
-        self
-    }
-
-    pub fn compress_rotated(mut self, compress: bool) -> Self {
-        self.compress_rotated = Some(compress);
-        self
-    }
-
-    pub fn build(self) -> AuditConfig {
-        let default = AuditConfig::default();
-        AuditConfig {
-            log_path: self.log_path.unwrap_or(default.log_path),
-            hmac_secret: self.hmac_secret.unwrap_or(default.hmac_secret),
-            enable_security_detection: self
-                .enable_security_detection
-                .unwrap_or(default.enable_security_detection),
-            max_file_size: self.max_file_size.unwrap_or(default.max_file_size),
-            max_rotated_files: self.max_rotated_files.unwrap_or(default.max_rotated_files),
-            enable_forwarding: self.enable_forwarding.unwrap_or(default.enable_forwarding),
-            forward_destinations: if self.forward_destinations.is_empty() {
-                default.forward_destinations
-            } else {
-                self.forward_destinations
-            },
-            compress_rotated: self.compress_rotated.unwrap_or(default.compress_rotated),
-        }
-    }
-}
-
-/// Log forwarding destination types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ForwardDestination {
-    /// Syslog (RFC 5424)
-    Syslog {
-        host: String,
-        port: u16,
-        protocol: SyslogProtocol,
-    },
-
-    /// HTTP webhook
-    Webhook {
-        url: String,
-        headers: HashMap<String, String>,
-    },
-
-    /// S3 bucket
-    S3 {
-        bucket: String,
-        prefix: String,
-        region: String,
-    },
-
-    /// Local file
-    File { path: PathBuf },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SyslogProtocol {
-    Udp,
-    Tcp,
-    Tls,
-}
 
 /// Main audit logger
 pub struct AuditLogger {
@@ -632,7 +202,7 @@ impl AuditLogger {
         *self.current_file.write().await = None;
 
         // Rotate existing files
-        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let rotated_path = self.config.log_path.with_file_name(format!(
             "{}.{}.log",
             self.config
@@ -722,7 +292,7 @@ impl AuditLogger {
     }
 
     /// Format audit event as RFC 5424 syslog message
-    fn format_syslog_rfc5424(&self, event: &AuditEvent) -> AuditResult<String> {
+    pub fn format_syslog_rfc5424(&self, event: &AuditEvent) -> AuditResult<String> {
         // RFC 5424 format: <PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA MSG
 
         // Priority: Facility(16=local0) * 8 + Severity
@@ -835,6 +405,7 @@ impl AuditLogger {
                             .map_err(|e| AuditError::Forwarding(e.to_string()))?;
                     }
                     SyslogProtocol::Tcp => {
+                        use tokio::io::AsyncWriteExt as _;
                         use tokio::net::TcpStream;
                         let mut stream = TcpStream::connect(format!("{}:{}", host, port))
                             .await
@@ -854,6 +425,7 @@ impl AuditLogger {
                         // TLS syslog forwarding would require certificate handling
                         // For now, fall back to TCP with a warning
                         warn!("TLS syslog not yet implemented, falling back to TCP");
+                        use tokio::io::AsyncWriteExt as _;
                         use tokio::net::TcpStream;
                         let mut stream = TcpStream::connect(format!("{}:{}", host, port))
                             .await
@@ -986,206 +558,11 @@ impl AuditLogger {
     }
 }
 
-/// Filter for querying audit events
-#[derive(Debug, Default)]
-pub struct AuditFilter {
-    pub actor: Option<String>,
-    pub action: Option<AuditAction>,
-    pub resource: Option<String>,
-    pub outcome: Option<AuditOutcome>,
-    pub from_time: Option<DateTime<Utc>>,
-    pub to_time: Option<DateTime<Utc>>,
-    pub source_ip: Option<String>,
-    pub limit: Option<usize>,
-}
-
-impl AuditFilter {
-    pub fn matches(&self, event: &AuditEvent) -> bool {
-        if let Some(ref actor) = self.actor {
-            if &event.actor != actor {
-                return false;
-            }
-        }
-
-        if let Some(ref action) = self.action {
-            if &event.action != action {
-                return false;
-            }
-        }
-
-        if let Some(ref resource) = self.resource {
-            if !event.resource.contains(resource) {
-                return false;
-            }
-        }
-
-        if let Some(ref outcome) = self.outcome {
-            if &event.outcome != outcome {
-                return false;
-            }
-        }
-
-        if let Some(ref from) = self.from_time {
-            if &event.timestamp < from {
-                return false;
-            }
-        }
-
-        if let Some(ref to) = self.to_time {
-            if &event.timestamp > to {
-                return false;
-            }
-        }
-
-        if let Some(ref ip) = self.source_ip {
-            if event.source_ip.as_ref() != Some(ip) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-/// Security event detected by the detector
-#[derive(Debug, Clone)]
-pub struct SecurityEvent {
-    pub event_type: String,
-    pub severity: SecuritySeverity,
-    pub description: String,
-    pub related_events: Vec<String>,
-}
-
-// Type aliases for complex types
-type FailedAuthMap = Arc<RwLock<HashMap<String, VecDeque<DateTime<Utc>>>>>;
-type AccessPatternMap = Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, String)>>>>;
-
-/// Security event detector using pattern matching
-pub struct SecurityEventDetector {
-    // Track failed auth attempts per IP
-    failed_auth_attempts: FailedAuthMap,
-
-    // Track unusual access patterns
-    access_patterns: AccessPatternMap,
-}
-
-impl SecurityEventDetector {
-    pub fn new() -> Self {
-        Self {
-            failed_auth_attempts: Arc::new(RwLock::new(HashMap::new())),
-            access_patterns: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// Detect security events from an audit event
-    pub async fn detect(&self, event: &AuditEvent) -> Option<SecurityEvent> {
-        // Detect multiple failed authentication attempts
-        if event.action == AuditAction::AuthFailure {
-            if let Some(ip) = &event.source_ip {
-                return self.detect_brute_force(ip, event).await;
-            }
-        }
-
-        // Detect privilege escalation
-        if event.action == AuditAction::ModifyPermissions
-            || event.action == AuditAction::PutBucketPolicy
-        {
-            return Some(SecurityEvent {
-                event_type: "privilege_escalation_attempt".to_string(),
-                severity: SecuritySeverity::High,
-                description: format!("User {} attempted to modify permissions", event.actor),
-                related_events: vec![event.event_id.clone()],
-            });
-        }
-
-        // Detect unusual access patterns
-        if matches!(
-            event.action,
-            AuditAction::GetObject | AuditAction::DeleteObject
-        ) {
-            return self.detect_unusual_access(&event.actor, event).await;
-        }
-
-        None
-    }
-
-    /// Detect brute force authentication attempts
-    async fn detect_brute_force(&self, ip: &str, event: &AuditEvent) -> Option<SecurityEvent> {
-        let mut attempts = self.failed_auth_attempts.write().await;
-        let entry = attempts.entry(ip.to_string()).or_insert_with(VecDeque::new);
-
-        // Add current attempt
-        entry.push_back(event.timestamp);
-
-        // Remove attempts older than 5 minutes
-        let cutoff = Utc::now() - chrono::Duration::minutes(5);
-        while let Some(front) = entry.front() {
-            if front < &cutoff {
-                entry.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // Check if we have more than 5 failed attempts in 5 minutes
-        if entry.len() >= 5 {
-            return Some(SecurityEvent {
-                event_type: "brute_force_attack".to_string(),
-                severity: SecuritySeverity::Critical,
-                description: format!("Multiple failed authentication attempts from IP {}", ip),
-                related_events: vec![event.event_id.clone()],
-            });
-        }
-
-        None
-    }
-
-    /// Detect unusual access patterns
-    async fn detect_unusual_access(
-        &self,
-        actor: &str,
-        event: &AuditEvent,
-    ) -> Option<SecurityEvent> {
-        let mut patterns = self.access_patterns.write().await;
-        let entry = patterns
-            .entry(actor.to_string())
-            .or_insert_with(VecDeque::new);
-
-        // Add current access
-        entry.push_back((event.timestamp, event.resource.clone()));
-
-        // Remove accesses older than 1 minute
-        let cutoff = Utc::now() - chrono::Duration::minutes(1);
-        while let Some((timestamp, _)) = entry.front() {
-            if timestamp < &cutoff {
-                entry.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // Check if we have more than 100 accesses in 1 minute (potential data exfiltration)
-        if entry.len() >= 100 {
-            return Some(SecurityEvent {
-                event_type: "unusual_access_pattern".to_string(),
-                severity: SecuritySeverity::Medium,
-                description: format!("User {} made {} accesses in 1 minute", actor, entry.len()),
-                related_events: vec![event.event_id.clone()],
-            });
-        }
-
-        None
-    }
-}
-
-impl Default for SecurityEventDetector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Compress a file using zstd
-async fn compress_file(input_path: &Path, output_path: &Path) -> AuditResult<()> {
+async fn compress_file(
+    input_path: &std::path::Path,
+    output_path: &std::path::Path,
+) -> AuditResult<()> {
     let input_data = tokio::fs::read(input_path).await?;
     let compressed = zstd::bulk::compress(&input_data, 3)
         .map_err(|e| AuditError::Io(std::io::Error::other(e)))?;
@@ -1196,6 +573,7 @@ async fn compress_file(input_path: &Path, output_path: &Path) -> AuditResult<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]

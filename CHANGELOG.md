@@ -5,6 +5,46 @@ All notable changes to rs3gw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-16
+
+### Added
+- PUT streaming backpressure with incremental SHA-256/MD5 hashing
+- Graceful shutdown with in-flight request drain (30s timeout)
+- Background multipart GC scheduler (configurable retention/interval)
+- Compression metrics wiring (zstd/lz4 ratio, original/compressed bytes)
+- gRPC parallel delete with buffer_unordered(10) concurrency
+- gRPC range GET support (range_start/range_end fields)
+- InFlightTracker/InFlightGuard for request lifecycle tracking
+- Filesystem error mapping (PermissionDenied → AccessDenied, StorageFull → InsufficientStorage)
+- Content-Length audit and verification for all GET/HEAD/range responses
+- Smoke tests for end-to-end lifecycle validation
+- DeleteObjects partial failure handling
+- Path traversal rejection regression tests
+- Zero-byte object roundtrip tests
+- SigV4 authentication with rate limiting (10 failures/60s)
+- Health JSON endpoint, /ready probe
+- Predictive analytics and cost forecasting
+- S3 Select with query plan cache and result cache
+- Arrow Flight protocol support
+- Object Lambda transformations
+- Data deduplication with content-addressable storage
+- Intelligent tiering with storage class transitions
+- Advanced replication manager
+- rs3ctl CLI tool (health, metrics, gc-multipart, benchmark, diagnose)
+
+### Changed
+- PUT handler now streams body via `Body` instead of buffering `Bytes`
+- StorageError::Io no longer auto-derives From; uses manual mapping
+- Compression applied at storage layer with metrics recording
+- Dependencies upgraded to latest compatible versions
+
+### Documentation
+- Production deployment guide (sizing, env vars, TLS, troubleshooting, monitoring)
+- README with quick start, boto3/AWS CLI examples, API compatibility table
+- OpenTelemetry environment variables documentation
+- Bucket stubs module documentation listing all 53 stub endpoints
+- rs3ctl CLI documentation
+
 ## [0.1.0] - 2026-01-04
 
 ### Added
@@ -203,4 +243,5 @@ N/A (initial release)
 - Review ABAC policies for fine-grained access control
 - Enable audit logging for compliance requirements
 
+[0.2.0]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.0
 [0.1.0]: https://github.com/cool-japan/rs3gw/releases/tag/v0.1.0

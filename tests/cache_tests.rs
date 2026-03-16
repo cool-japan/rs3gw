@@ -58,6 +58,8 @@ async fn setup_test_server_with_cache() -> (Client, TempDir, tokio::task::JoinHa
         dedup: rs3gw::storage::DedupConfig::disabled(),
         zerocopy: rs3gw::storage::ZeroCopyConfig::default(),
         select_cache: rs3gw::SelectCacheConfig::default(),
+        multipart_retention_hours: 168,
+        fsync: false,
     };
 
     let state = rs3gw::AppState::new(

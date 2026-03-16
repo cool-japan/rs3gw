@@ -107,9 +107,31 @@ tokio::try_join!(grpc_handle, http_handle)?;
 ```
 
 **Configuration:**
-- `RS3GW_GRPC_ENABLED` - Enable gRPC server (default: false)
-- `RS3GW_GRPC_PORT` - gRPC server port (default: 50051)
-- `RS3GW_GRPC_MAX_MESSAGE_SIZE` - Max message size (default: 64MB)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_GRPC_ENABLED` | `false` | Set to `true` to start the gRPC server alongside the HTTP server |
+| `RS3GW_GRPC_PORT` | `50051` | TCP port the gRPC server listens on |
+| `RS3GW_GRPC_MAX_MESSAGE_SIZE` | `67108864` | Maximum gRPC message size in bytes (default 64 MB). Applies to both encoding and decoding |
+| `RS3GW_GRPC_TLS_CERT` | _(none)_ | Path to PEM certificate file. When both cert and key are provided, gRPC TLS is enabled |
+| `RS3GW_GRPC_TLS_KEY` | _(none)_ | Path to PEM private key file |
+
+**Notes:**
+- gRPC is **disabled by default**. Set `RS3GW_GRPC_ENABLED=true` to activate it.
+- TLS requires manually provisioned certificates; there is no auto-TLS support.
+- When TLS is enabled, clients must connect with `https://` (or the tonic TLS channel type).
+- `RS3GW_GRPC_MAX_MESSAGE_SIZE` affects both server decoding (inbound) and encoding (outbound). Clients must be configured with a compatible limit for large object transfers.
+
+**Example — start with gRPC enabled and TLS:**
+
+```bash
+RS3GW_GRPC_ENABLED=true \
+RS3GW_GRPC_PORT=50051 \
+RS3GW_GRPC_MAX_MESSAGE_SIZE=134217728 \
+RS3GW_GRPC_TLS_CERT=/etc/rs3gw/grpc.crt \
+RS3GW_GRPC_TLS_KEY=/etc/rs3gw/grpc.key \
+rs3gw
+```
 
 ### Bucket Operations (`bucket.rs`)
 gRPC service for bucket management.
@@ -610,8 +632,8 @@ Server::builder()
 ```
 
 **Environment Variables:**
-- `RS3GW_GRPC_TLS_CERT` - TLS certificate path
-- `RS3GW_GRPC_TLS_KEY` - TLS private key path
+- `RS3GW_GRPC_TLS_CERT` — path to the PEM certificate file (enables TLS when both cert and key are set)
+- `RS3GW_GRPC_TLS_KEY` — path to the PEM private key file
 
 ### Authentication
 

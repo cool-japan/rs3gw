@@ -459,16 +459,19 @@ mod tests {
     use tempfile::TempDir;
 
     fn setup_manager() -> (Arc<TrainingManager>, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
         let manager: Arc<TrainingManager> =
             Arc::new(TrainingManager::new(temp_dir.path().to_path_buf()));
         (manager, temp_dir)
     }
 
     fn create_test_app_state(manager: Arc<TrainingManager>) -> crate::AppState {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
         let storage_root = temp_dir.path().to_path_buf();
-        let storage = Arc::new(crate::storage::StorageEngine::new(storage_root.clone()).unwrap());
+        let storage = Arc::new(
+            crate::storage::StorageEngine::new(storage_root.clone())
+                .expect("failed to create storage engine"),
+        );
         // Use shared test metrics handle to avoid conflicts with other test modules
         let metrics_handle = crate::test_helpers::get_test_metrics_handle();
         let preprocessing_path = temp_dir.path().join("preprocessing");
@@ -488,7 +491,9 @@ mod tests {
         let query_intelligence = Arc::new(crate::api::QueryIntelligence::new());
 
         let config = crate::Config {
-            bind_addr: "127.0.0.1:9000".parse().unwrap(),
+            bind_addr: "127.0.0.1:9000"
+                .parse()
+                .expect("failed to parse bind address"),
             storage_root,
             default_bucket: "default".to_string(),
             access_key: String::new(),
@@ -502,6 +507,8 @@ mod tests {
             dedup: crate::storage::DedupConfig::disabled(),
             zerocopy: crate::storage::ZeroCopyConfig::default(),
             select_cache: crate::SelectCacheConfig::default(),
+            multipart_retention_hours: 168,
+            fsync: false,
         };
 
         crate::AppState {
@@ -521,6 +528,11 @@ mod tests {
             metrics_tracker,
             training_manager: manager,
             start_time: std::time::Instant::now(),
+            verifier: None,
+            auth_failure_counts: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            in_flight: crate::InFlightTracker::new(),
         }
     }
 
@@ -539,7 +551,7 @@ mod tests {
         let result = create_experiment(State(state), Json(req)).await;
         assert!(result.is_ok());
 
-        let response = result.unwrap().0;
+        let response = result.expect("create_experiment should succeed").0;
         assert_eq!(response.experiment.name, "test-exp");
     }
 
@@ -555,7 +567,10 @@ mod tests {
             tags: vec![],
             hyperparameters: json!({}),
         };
-        let exp = manager.create_experiment(exp_config).await.unwrap();
+        let exp = manager
+            .create_experiment(exp_config)
+            .await
+            .expect("create experiment should succeed");
 
         // Save checkpoint
         let model_data = b"model_data";
@@ -572,16 +587,20 @@ mod tests {
             save_checkpoint(State(state.clone()), Path(exp.id.clone()), Json(save_req)).await;
         assert!(save_result.is_ok());
 
-        let checkpoint_id = save_result.unwrap().0.checkpoint.id;
+        let checkpoint_id = save_result
+            .expect("save_checkpoint should succeed")
+            .0
+            .checkpoint
+            .id;
 
         // Load checkpoint
         let load_result = load_checkpoint(State(state), Path(checkpoint_id)).await;
         assert!(load_result.is_ok());
 
-        let loaded = load_result.unwrap().0;
+        let loaded = load_result.expect("load_checkpoint should succeed").0;
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&loaded.model_state)
-            .unwrap();
+            .expect("base64 decode should succeed");
         assert_eq!(decoded, model_data);
     }
 
@@ -596,7 +615,10 @@ mod tests {
             tags: vec![],
             hyperparameters: json!({}),
         };
-        let exp = manager.create_experiment(exp_config).await.unwrap();
+        let exp = manager
+            .create_experiment(exp_config)
+            .await
+            .expect("create experiment should succeed");
 
         // Log metrics
         let log_req = LogMetricsRequest {
@@ -612,7 +634,7 @@ mod tests {
         let get_result = get_metrics(State(state), Path(exp.id)).await;
         assert!(get_result.is_ok());
 
-        let response = get_result.unwrap().0;
+        let response = get_result.expect("get_metrics should succeed").0;
         assert_eq!(response.count, 1);
         assert_eq!(response.metrics[0].step, 1);
     }
@@ -628,7 +650,10 @@ mod tests {
             tags: vec![],
             hyperparameters: json!({}),
         };
-        let exp = manager.create_experiment(exp_config).await.unwrap();
+        let exp = manager
+            .create_experiment(exp_config)
+            .await
+            .expect("create experiment should succeed");
 
         let update_req = UpdateStatusRequest {
             status: ExperimentStatus::Completed,
@@ -639,7 +664,10 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify status was updated
-        let updated = manager.get_experiment(&exp.id).await.unwrap();
+        let updated = manager
+            .get_experiment(&exp.id)
+            .await
+            .expect("get experiment should succeed");
         assert_eq!(updated.status, ExperimentStatus::Completed);
     }
 
@@ -654,7 +682,10 @@ mod tests {
             tags: vec![],
             hyperparameters: json!({}),
         };
-        let exp = manager.create_experiment(exp_config).await.unwrap();
+        let exp = manager
+            .create_experiment(exp_config)
+            .await
+            .expect("create experiment should succeed");
 
         // Save 2 checkpoints
         for epoch in 1..=2 {
@@ -667,13 +698,13 @@ mod tests {
                     json!({"epoch": epoch}),
                 )
                 .await
-                .unwrap();
+                .expect("save_checkpoint should succeed");
         }
 
         let result = list_checkpoints(State(state), Path(exp.id)).await;
         assert!(result.is_ok());
 
-        let response = result.unwrap().0;
+        let response = result.expect("list_checkpoints should succeed").0;
         assert_eq!(response.count, 2);
     }
 
@@ -690,7 +721,7 @@ mod tests {
         let result = create_search(State(state), Json(req)).await;
         assert!(result.is_ok());
 
-        let response = result.unwrap().0;
+        let response = result.expect("create_search should succeed").0;
         assert_eq!(response.search.optimization_metric, "accuracy");
     }
 }

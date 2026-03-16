@@ -214,12 +214,15 @@ mod tests {
 
         assert!(upload_bw > 0.0, "Upload bandwidth should be positive");
         assert!(download_bw > 0.0, "Download bandwidth should be positive");
-        // Due to timing differences between separate await calls, we use a larger tolerance
+        // Due to timing differences between separate await calls, we use a relative tolerance
+        let sum_bw = upload_bw + download_bw;
+        let relative_diff = (total_bw - sum_bw).abs() / sum_bw;
         assert!(
-            (total_bw - (upload_bw + download_bw)).abs() < 100.0,
-            "Total bandwidth should approximately equal sum (got total={}, upload+download={})",
+            relative_diff < 0.05,
+            "Total bandwidth should approximately equal sum (got total={}, upload+download={}, relative_diff={})",
             total_bw,
-            upload_bw + download_bw
+            sum_bw,
+            relative_diff
         );
     }
 

@@ -8,12 +8,19 @@
 //! cargo build --target wasm32-unknown-unknown --release
 //! ```
 
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
 
+#[cfg(target_arch = "wasm32")]
 extern crate alloc;
 
+#[cfg(target_arch = "wasm32")]
 use alloc::string::String;
+#[cfg(target_arch = "wasm32")]
 use alloc::vec::Vec;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::vec::Vec;
+
 use core::slice;
 use serde_json::Value;
 
@@ -93,7 +100,7 @@ fn pack_result(mut output: Vec<u8>) -> u64 {
 
 /// Pack error message into return value
 fn pack_error(error_msg: &[u8]) -> u64 {
-    let mut error_vec = Vec::from(error_msg);
+    let error_vec = Vec::from(error_msg);
     pack_result(error_vec)
 }
 
@@ -114,10 +121,12 @@ pub extern "C" fn deallocate(ptr: *mut u8, size: usize) {
     }
 }
 
-/// Initialize global allocator
+/// Initialize global allocator (WASM only)
+#[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}

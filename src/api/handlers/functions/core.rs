@@ -108,6 +108,24 @@ pub fn storage_error_to_response(err: StorageError, resource: &str) -> Response 
             "The bucket you tried to delete is not empty.",
             resource,
         ),
+        StorageError::AccessDenied => error_response(
+            StatusCode::FORBIDDEN,
+            "AccessDenied",
+            "Access Denied",
+            resource,
+        ),
+        StorageError::InvalidBucketName(ref name) => error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidBucketName",
+            &format!("The specified bucket is not valid: {}", name),
+            resource,
+        ),
+        StorageError::TooManyBuckets => error_response(
+            StatusCode::BAD_REQUEST,
+            "TooManyBuckets",
+            "You have attempted to create more buckets than allowed.",
+            resource,
+        ),
         StorageError::InvalidRange => error_response(
             StatusCode::RANGE_NOT_SATISFIABLE,
             "InvalidRange",
@@ -126,6 +144,9 @@ pub fn storage_error_to_response(err: StorageError, resource: &str) -> Response 
             "Part number must be between 1 and 10000.",
             resource,
         ),
+        StorageError::InvalidPart(ref msg) => {
+            error_response(StatusCode::BAD_REQUEST, "InvalidPart", msg, resource)
+        }
         StorageError::Io(e) => {
             error!("Storage I/O error: {}", e);
             error_response(
@@ -144,6 +165,19 @@ pub fn storage_error_to_response(err: StorageError, resource: &str) -> Response 
                 resource,
             )
         }
+        StorageError::InvalidKey(ref reason) => error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidKey",
+            &format!("The specified key is not valid: {}", reason),
+            resource,
+        ),
+        StorageError::InsufficientStorage => error_response(
+            // 507 Insufficient Storage (RFC 4918)
+            StatusCode::from_u16(507).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            "InsufficientStorage",
+            "You have exceeded the storage capacity of your account.",
+            resource,
+        ),
     }
 }
 /// List all buckets
@@ -224,6 +258,21 @@ pub async fn head_bucket(State(state): State<AppState>, Path(bucket): Path<Strin
 )]
 pub async fn create_bucket(State(state): State<AppState>, Path(bucket): Path<String>) -> Response {
     info!(bucket = % bucket, "CreateBucket");
+
+    // Validate bucket name per S3 rules:
+    // - 3–63 characters long
+    // - Only lowercase letters, numbers, and hyphens
+    // - Must start and end with a letter or number
+    // - Must not be formatted as an IP address
+    if let Err(reason) = validate_bucket_name(&bucket) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidBucketName",
+            &format!("The specified bucket is not valid: {}", reason),
+            &format!("/{}", bucket),
+        );
+    }
+
     match state.storage.create_bucket(&bucket).await {
         Ok(()) => {
             let event = S3Event::new(S3EventType::BucketCreated, bucket.clone());
@@ -232,6 +281,70 @@ pub async fn create_bucket(State(state): State<AppState>, Path(bucket): Path<Str
         }
         Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
     }
+}
+
+/// Validate a bucket name against S3 bucket naming rules.
+///
+/// Returns `Ok(())` if the name is valid, or `Err(reason)` with a human-readable
+/// description of why the name is invalid.
+fn validate_bucket_name(bucket: &str) -> Result<(), String> {
+    let len = bucket.len();
+    if len < 3 {
+        return Err(format!(
+            "bucket name '{}' is too short ({} chars); minimum is 3",
+            bucket, len
+        ));
+    }
+    if len > 63 {
+        return Err(format!(
+            "bucket name is too long ({} chars); maximum is 63",
+            len
+        ));
+    }
+    // Only lowercase letters, digits, and hyphens are allowed
+    if !bucket
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+    {
+        return Err(format!(
+            "bucket name '{}' contains invalid characters; only lowercase letters, digits, hyphens, and dots are allowed",
+            bucket
+        ));
+    }
+    // Must start with a letter or digit (not a hyphen or dot)
+    if let Some(first) = bucket.chars().next() {
+        if first == '-' || first == '.' {
+            return Err(format!(
+                "bucket name '{}' must start with a letter or digit",
+                bucket
+            ));
+        }
+    }
+    // Must end with a letter or digit (not a hyphen or dot)
+    if let Some(last) = bucket.chars().last() {
+        if last == '-' || last == '.' {
+            return Err(format!(
+                "bucket name '{}' must end with a letter or digit",
+                bucket
+            ));
+        }
+    }
+    // Must not contain consecutive dots
+    if bucket.contains("..") {
+        return Err(format!(
+            "bucket name '{}' must not contain consecutive dots",
+            bucket
+        ));
+    }
+    // Must not contain uppercase letters (already caught by the char check above,
+    // but we provide a clearer message here for names with uppercase)
+    if bucket.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(format!(
+            "bucket name '{}' must not contain uppercase letters",
+            bucket
+        ));
+    }
+    Ok(())
 }
 /// Delete a bucket
 #[utoipa::path(

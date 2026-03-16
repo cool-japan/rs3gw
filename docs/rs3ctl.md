@@ -745,6 +745,204 @@ The following features are planned for future versions:
 
 ---
 
+## Environment Variables
+
+All runtime configuration for `rs3gw` is controlled through environment variables. There is no separate config file for rs3ctl itself, but the server it connects to reads the variables below.
+
+### Core
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_BIND_ADDR` | `0.0.0.0:9000` | Server listen address (host:port) |
+| `RS3GW_STORAGE_ROOT` | `./data` | Root directory for all stored objects and metadata |
+| `RS3GW_DEFAULT_BUCKET` | `default` | Default bucket name (single-bucket mode) |
+| `RS3GW_REQUEST_TIMEOUT` | `300` | Per-request timeout in seconds (0 = no timeout) |
+| `RS3GW_MAX_CONCURRENT` | `0` | Maximum concurrent requests (0 = unlimited) |
+| `RS3GW_MULTIPART_RETENTION_HOURS` | `168` | Hours before abandoned multipart uploads are garbage-collected (7 days) |
+| `RS3GW_REGION` | `us-east-1` | Region string returned by `GetBucketLocation` and used in SigV4 validation |
+| `RS3GW_CHECKSUM_VALIDATION` | `false` | When `true`, SHA-256 digest is verified on every `GetObject` before streaming |
+| `RS3GW_FSYNC` | `false` | When `true`, calls `sync_all()` on temp files before atomic rename (safer but slower) |
+
+### TLS (HTTP)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_TLS_CERT` | _(none)_ | Path to PEM certificate file; enables HTTPS when both cert and key are set |
+| `RS3GW_TLS_KEY` | _(none)_ | Path to PEM private key file |
+
+### Auth
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_ACCESS_KEY` | _(empty)_ | AWS access key ID; when empty, SigV4 auth is disabled (passthrough mode) |
+| `RS3GW_SECRET_KEY` | _(empty)_ | AWS secret access key; must be set together with `RS3GW_ACCESS_KEY` |
+
+### Cache
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_CACHE_ENABLED` | `true` | Enable in-memory object cache |
+| `RS3GW_CACHE_MAX_SIZE_MB` | `256` | Maximum cache size in megabytes |
+| `RS3GW_CACHE_MAX_OBJECTS` | `10000` | Maximum number of cached objects |
+| `RS3GW_CACHE_TTL` | `300` | Cache entry TTL in seconds |
+| `RS3GW_SELECT_CACHE_ENABLED` | `true` | Enable S3 Select result caching |
+| `RS3GW_SELECT_CACHE_MAX_ENTRIES` | `1000` | Maximum number of cached query results |
+| `RS3GW_SELECT_CACHE_MAX_MEMORY_MB` | `100` | Maximum memory for S3 Select cache in megabytes |
+| `RS3GW_SELECT_CACHE_TTL` | `3600` | S3 Select cache TTL in seconds |
+
+### Throttle
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_THROTTLE_ENABLED` | `false` | Enable per-client request throttling |
+| `RS3GW_THROTTLE_RPS` | `0` | Max requests per second per client (0 = unlimited) |
+| `RS3GW_THROTTLE_UPLOAD_MBPS` | `0` | Upload bandwidth limit in MB/s (0 = unlimited) |
+| `RS3GW_THROTTLE_DOWNLOAD_MBPS` | `0` | Download bandwidth limit in MB/s (0 = unlimited) |
+
+### Dedup / Compression
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_COMPRESSION` | _(none)_ | Compression mode: `none`, `lz4`, `zstd`, or `zstd:LEVEL` (level 1-22) |
+| `RS3GW_DEDUP_ENABLED` | `true` | Enable block-level data deduplication |
+| `RS3GW_DEDUP_BLOCK_SIZE` | `65536` | Dedup chunk size in bytes (default 64 KB) |
+| `RS3GW_DEDUP_ALGORITHM` | `fixed` | Chunking algorithm: `fixed` or `content-defined` (CDC) |
+| `RS3GW_DEDUP_MIN_SIZE` | `131072` | Minimum object size to deduplicate in bytes (default 128 KB) |
+
+### Storage
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_ZEROCOPY_DIRECT_IO` | `true` | Enable direct I/O (kernel bypass) for large objects |
+| `RS3GW_ZEROCOPY_DIRECT_IO_THRESHOLD` | `1048576` | Minimum object size for direct I/O in bytes (default 1 MB) |
+| `RS3GW_ZEROCOPY_SPLICE` | `true` | Enable splice(2) zero-copy on Linux |
+| `RS3GW_ZEROCOPY_MMAP` | `true` | Enable mmap for metadata reads |
+| `RS3GW_QUOTA_ENABLED` | `false` | Enable per-bucket storage quotas |
+| `RS3GW_QUOTA_MAX_STORAGE_GB` | `0` | Default maximum storage per bucket in GB (0 = unlimited) |
+| `RS3GW_QUOTA_MAX_OBJECTS` | `0` | Default maximum objects per bucket (0 = unlimited) |
+
+### gRPC
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_GRPC_ENABLED` | `false` | Enable the gRPC API server |
+| `RS3GW_GRPC_PORT` | `50051` | gRPC server listen port |
+| `RS3GW_GRPC_MAX_MESSAGE_SIZE` | `67108864` | Maximum gRPC message size in bytes (default 64 MB) |
+| `RS3GW_GRPC_TLS_CERT` | _(none)_ | Path to PEM certificate for gRPC TLS; enables TLS when both cert and key are set |
+| `RS3GW_GRPC_TLS_KEY` | _(none)_ | Path to PEM private key for gRPC TLS |
+
+### Cluster
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_CLUSTER_ENABLED` | `false` | Enable cluster/gossip mode |
+| `RS3GW_CLUSTER_NODE_ID` | _(auto)_ | Unique node identifier within the cluster |
+| `RS3GW_CLUSTER_ADVERTISE_ADDR` | `127.0.0.1:9001` | Address advertised to peers for cluster traffic |
+| `RS3GW_CLUSTER_PORT` | `9001` | Local port for cluster communication |
+| `RS3GW_CLUSTER_SEED_NODES` | _(none)_ | Comma-separated list of peer addresses to bootstrap cluster membership |
+| `RS3GW_REPLICATION_MODE` | `async` | Replication mode: `async`, `sync`, or `quorum` |
+| `RS3GW_REPLICATION_FACTOR` | `2` | Number of replicas per object |
+
+### Connection Pool (outbound HTTP)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_POOL_MAX_IDLE` | `32` | Maximum idle connections per host in the outbound HTTP pool |
+| `RS3GW_POOL_IDLE_TIMEOUT` | `90` | Idle connection timeout in seconds |
+| `RS3GW_CONNECT_TIMEOUT` | `30` | TCP connection timeout in seconds |
+| `RS3GW_CLIENT_TIMEOUT` | `300` | Overall outbound request timeout in seconds |
+
+### Observability
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_PROFILING_CPU` | `false` | Enable CPU profiling |
+| `RS3GW_PROFILING_MEMORY` | `false` | Enable memory profiling |
+| `RS3GW_PROFILING_IO` | `false` | Enable I/O profiling |
+| `RS3GW_PROFILING_CPU_RATE` | _(default)_ | CPU sample rate in Hz |
+| `RS3GW_PROFILING_MEMORY_RATE` | _(default)_ | Memory sample rate |
+| `RS3GW_PROFILING_INTERVAL` | _(default)_ | Profile collection interval in seconds |
+| `RS3GW_PROFILING_MAX_PROFILES` | _(default)_ | Maximum number of profiles to retain in memory |
+| `RS3GW_PROFILING_OUTPUT_DIR` | _(none)_ | Directory to write flamegraph/profile output files |
+| `RS3GW_ADAPTIVE_RATE_LIMIT` | `false` | Enable adaptive rate limiting based on load |
+| `RS3GW_INITIAL_RATE_LIMIT` | _(default)_ | Initial request rate limit (requests/sec) |
+| `RS3GW_MIN_RATE_LIMIT` | _(default)_ | Minimum rate limit floor |
+| `RS3GW_MAX_RATE_LIMIT` | _(default)_ | Maximum rate limit ceiling |
+| `RS3GW_LOAD_SHEDDING_THRESHOLD` | _(default)_ | CPU utilization fraction at which load shedding activates |
+| `RS3GW_MEMORY_THRESHOLD` | _(default)_ | Memory pressure fraction at which load shedding activates |
+| `RS3GW_TARGET_CPU` | _(default)_ | Target CPU utilization fraction for adaptive scaling |
+| `RS3GW_MIN_THREADS` | _(default)_ | Minimum Tokio worker threads |
+| `RS3GW_MAX_THREADS` | _(default)_ | Maximum Tokio worker threads |
+| `RS3GW_ADJUSTMENT_INTERVAL` | _(default)_ | Interval in seconds between adaptive resource adjustments |
+
+---
+
+## Configuration Precedence
+
+Environment variables are the primary configuration mechanism. A TOML config file (`rs3gw.toml`) is also supported. The load order is:
+
+1. **Compiled defaults** — hardcoded values in `Config::default()`.
+2. **Config file** — `rs3gw.toml` (or the path supplied via `--config`), if the file exists. File values override compiled defaults.
+3. **Environment variable overrides** — any `RS3GW_*` variable that is set overrides the corresponding file or default value.
+
+YAML configuration is not currently supported. TOML/YAML file support with hot-reload is planned for a future release.
+
+**Example — override bind address at startup:**
+
+```bash
+RS3GW_BIND_ADDR=0.0.0.0:8080 rs3gw
+```
+
+**Example — enable gRPC with TLS:**
+
+```bash
+RS3GW_GRPC_ENABLED=true \
+RS3GW_GRPC_TLS_CERT=/etc/rs3gw/grpc.crt \
+RS3GW_GRPC_TLS_KEY=/etc/rs3gw/grpc.key \
+rs3gw
+```
+
+---
+
+## On-Disk Format v1
+
+rs3gw stores all objects and metadata under `RS3GW_STORAGE_ROOT` using a simple, human-inspectable directory tree.
+
+### Directory Structure
+
+```
+<root>/
+  <bucket>/
+    objects/<encoded_key>              # object data (may be zstd/lz4 compressed)
+    metadata/<encoded_key>.json        # JSON: ObjectMetadata (schema_version=1)
+    sci_metadata/<encoded_key>.json    # JSON: SciMetadata (HPC/AI fields)
+    tags/<encoded_key>.json            # JSON: ObjectTagging
+    bucket_tags.json                   # JSON: bucket-level tags
+    bucket_policy.json                 # JSON: bucket access policy
+    multipart/<upload_id>/
+      metadata.json                    # JSON: MultipartMetadata
+      part-00001, part-00002, ...      # raw part data files
+```
+
+### Key Points
+
+- **`schema_version: 1`** — every `metadata/<key>.json` file contains `"schema_version": 1`. Future breaking metadata changes will increment this value so older binaries can refuse incompatible data.
+- **`__DIROBJ__` sentinel** — S3 keys that end with `/` (directory-placeholder objects) are stored by appending `__DIROBJ__` as the final path component, e.g. `folder/` → `folder/__DIROBJ__`. This allows the keys to round-trip cleanly on filesystems that disallow trailing slashes in filenames.
+- **Atomic-rename durability** — writes go to a temp file (`<path>.tmp.<nanos>`) and are `rename`d into place, so readers never see partial writes.
+- **Forward compatibility with pre-0.2.0 data** — if `schema_version` is absent in a metadata file it defaults to `1`, making all pre-0.2.0 metadata forward-compatible. No migration tooling is required.
+- **Checksum storage** — when `RS3GW_CHECKSUM_VALIDATION=true` the SHA-256 digest (base64-encoded) is stored in the `__checksum_value__` metadata field and verified on every `GetObject`.
+
+---
+
+## Regions and LocationConstraint
+
+- `GetBucketLocation` always returns the region configured via `RS3GW_REGION` (default: `us-east-1`).
+- All standard AWS region strings (e.g. `eu-west-1`, `ap-northeast-1`) are accepted in the SigV4 credential scope without error; rs3gw does not validate the region string.
+- The region value affects SigV4 signature verification — the client and server must agree on the region string.
+- Multi-region routing (routing requests to different nodes based on region) is planned for a future release.
+
+---
+
 ## See Also
 
 - [rs3gw Main Documentation](../README.md)

@@ -18,45 +18,65 @@
 //! The compiled WASM module will be in:
 //! `target/wasm32-unknown-unknown/release/uppercase_wasm_plugin.wasm`
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::panic::PanicInfo;
-use core::slice;
+// WASM target: custom allocator and panic handler (no_std environment)
+#[cfg(target_arch = "wasm32")]
+mod wasm_support {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::panic::PanicInfo;
 
-/// Simple bump allocator for WASM
-struct BumpAllocator;
+    /// Simple bump allocator for WASM
+    pub struct BumpAllocator;
 
-static mut HEAP: [u8; 64 * 1024] = [0; 64 * 1024]; // 64KB heap
-static mut HEAP_POS: usize = 0;
+    static mut HEAP: [u8; 64 * 1024] = [0; 64 * 1024]; // 64KB heap
+    static mut HEAP_POS: usize = 0;
 
-unsafe impl GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
-        let align = layout.align();
+    unsafe impl GlobalAlloc for BumpAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let size = layout.size();
+            let align = layout.align();
 
-        // Align the current position
-        let pos = (HEAP_POS + align - 1) & !(align - 1);
+            // Align the current position
+            let pos = (HEAP_POS + align - 1) & !(align - 1);
 
-        // Check if we have enough space
-        if pos + size > HEAP.len() {
-            return core::ptr::null_mut();
+            // Check if we have enough space
+            if pos + size > HEAP.len() {
+                return core::ptr::null_mut();
+            }
+
+            HEAP_POS = pos + size;
+            HEAP.as_mut_ptr().add(pos)
         }
 
-        HEAP_POS = pos + size;
-        HEAP.as_mut_ptr().add(pos)
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+            // Bump allocator doesn't support deallocation
+        }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Bump allocator doesn't support deallocation
+    #[global_allocator]
+    static ALLOCATOR: BumpAllocator = BumpAllocator;
+
+    /// Panic handler for no_std
+    #[panic_handler]
+    fn panic(_info: &PanicInfo) -> ! {
+        loop {}
     }
-}
 
-#[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+    /// Allocate memory using our custom bump allocator
+    pub fn bump_alloc(size: u32) -> u32 {
+        let layout = match Layout::from_size_align(size as usize, 1) {
+            Ok(layout) => layout,
+            Err(_) => return 0,
+        };
 
-/// Panic handler for no_std
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+        unsafe {
+            let ptr = ALLOCATOR.alloc(layout);
+            if ptr.is_null() {
+                0
+            } else {
+                ptr as u32
+            }
+        }
+    }
 }
 
 /// Allocate memory for input data
@@ -68,17 +88,23 @@ fn panic(_info: &PanicInfo) -> ! {
 /// Pointer to allocated memory (0 if allocation failed)
 #[no_mangle]
 pub extern "C" fn alloc(size: u32) -> u32 {
-    let layout = match Layout::from_size_align(size as usize, 1) {
-        Ok(layout) => layout,
-        Err(_) => return 0,
-    };
-
-    unsafe {
-        let ptr = ALLOCATOR.alloc(layout);
-        if ptr.is_null() {
-            0
-        } else {
-            ptr as u32
+    #[cfg(target_arch = "wasm32")]
+    {
+        wasm_support::bump_alloc(size)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let layout = match std::alloc::Layout::from_size_align(size as usize, 1) {
+            Ok(layout) => layout,
+            Err(_) => return 0,
+        };
+        unsafe {
+            let ptr = std::alloc::alloc(layout);
+            if ptr.is_null() {
+                0
+            } else {
+                ptr as u32
+            }
         }
     }
 }
@@ -102,7 +128,7 @@ pub extern "C" fn alloc(size: u32) -> u32 {
 pub extern "C" fn transform(ptr: u32, len: u32) -> u64 {
     unsafe {
         // Read input data from linear memory
-        let input_slice = slice::from_raw_parts(ptr as *const u8, len as usize);
+        let input_slice = core::slice::from_raw_parts(ptr as *const u8, len as usize);
 
         // Allocate output buffer (same size as input)
         let output_ptr = alloc(len);
@@ -110,7 +136,7 @@ pub extern "C" fn transform(ptr: u32, len: u32) -> u64 {
             return 0; // Allocation failed
         }
 
-        let output_slice = slice::from_raw_parts_mut(output_ptr as *mut u8, len as usize);
+        let output_slice = core::slice::from_raw_parts_mut(output_ptr as *mut u8, len as usize);
 
         // Transform: convert to uppercase
         for (i, &byte) in input_slice.iter().enumerate() {

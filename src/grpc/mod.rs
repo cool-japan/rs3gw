@@ -33,4 +33,4 @@ pub mod proto {
     }
 }
 
-pub use server::GrpcServer;
+pub use server::{GrpcConfig, GrpcServer};

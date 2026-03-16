@@ -136,6 +136,7 @@ mod tests {
             last_modified: Utc::now(),
             content_type: "application/octet-stream".to_string(),
             metadata: std::collections::HashMap::new(),
+            schema_version: 1,
         };
         for _ in 0..5 {
             cache_manager

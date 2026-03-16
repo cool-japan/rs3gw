@@ -57,6 +57,8 @@ async fn setup_versioning_server() -> (aws_sdk_s3::Client, VersioningTestServer)
         dedup: rs3gw::storage::DedupConfig::disabled(),
         zerocopy: rs3gw::storage::ZeroCopyConfig::default(),
         select_cache: rs3gw::SelectCacheConfig::default(),
+        multipart_retention_hours: 168,
+        fsync: false,
     };
 
     // Initialize preprocessing manager
@@ -101,6 +103,11 @@ async fn setup_versioning_server() -> (aws_sdk_s3::Client, VersioningTestServer)
         metrics_tracker,
         training_manager,
         start_time: std::time::Instant::now(),
+        verifier: None,
+        auth_failure_counts: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        in_flight: rs3gw::InFlightTracker::new(),
     };
 
     let app = axum::Router::new()

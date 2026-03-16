@@ -1,290 +1,309 @@
 # rs3gw Production Deployment Guide
 
-This guide provides comprehensive instructions for deploying rs3gw in production environments with best practices for security, high availability, and operational excellence.
+This guide covers production sizing, configuration, TLS, compression, monitoring, and troubleshooting for rs3gw -- an S3-compatible object storage gateway for AI/HPC workloads.
 
 ## Table of Contents
 
-- [Deployment Options](#deployment-options)
-- [Security Best Practices](#security-best-practices)
-- [High Availability Setup](#high-availability-setup)
-- [Monitoring & Observability](#monitoring--observability)
-- [Backup & Disaster Recovery](#backup--disaster-recovery)
-- [Performance Optimization](#performance-optimization)
-- [Troubleshooting](#troubleshooting)
-- [ML/AI Features & Dataset Preprocessing](#mlai-features--dataset-preprocessing)
+- [Production Sizing Guidance](#1-production-sizing-guidance)
+- [Data Directory Layout](#2-data-directory-layout)
+- [Environment Variables Reference](#3-environment-variables-reference)
+- [Configuration File](#4-configuration-file)
+- [TLS Configuration](#5-tls-configuration)
+- [Compression Configuration](#6-compression-configuration)
+- [Troubleshooting](#7-troubleshooting)
+- [Monitoring](#8-monitoring)
+- [Deployment Examples](#9-deployment-examples)
 
 ---
 
-## Deployment Options
+## 1. Production Sizing Guidance
 
-### 1. Docker Deployment (Recommended for Getting Started)
+| Scale | CPU | RAM | Disk | Concurrent Requests | Notes |
+|-------|-----|-----|------|---------------------|-------|
+| Small (< 1TB) | 2 cores | 4GB | SSD recommended | 100 | Dev/test, small teams |
+| Medium (1-10TB) | 4-8 cores | 8-16GB | NVMe SSD | 500 | Production workloads |
+| Large (> 10TB) | 16+ cores | 32GB+ | NVMe SSD RAID | 2000+ | HPC/AI pipelines |
 
-#### Single Node Deployment
+**Key considerations:**
 
-```bash
-# Build the Docker image
-docker build -t rs3gw:latest .
+- **CPU**: rs3gw is async (tokio-based). Worker threads auto-scale between `RS3GW_MIN_THREADS` (default 4) and `RS3GW_MAX_THREADS` (default `num_cpus * 4`). Compression (zstd/lz4) adds CPU overhead proportional to write throughput.
+- **RAM**: The in-memory object cache (`RS3GW_CACHE_MAX_SIZE_MB`, default 256MB), S3 Select cache (`RS3GW_SELECT_CACHE_MAX_MEMORY_MB`, default 100MB), and deduplication index all consume memory. Budget at least 2x the sum of these caches plus OS overhead.
+- **Disk**: Random-read latency dominates GET performance. NVMe SSDs are strongly recommended for medium and large deployments. Use RAID-10 or ZFS mirrors for data safety at the large scale.
+- **Network**: At the large scale, 10GbE or faster is recommended. Enable zero-copy optimizations (`RS3GW_ZEROCOPY_SPLICE=true`) to minimize kernel copies.
+- **File descriptors**: Set `LimitNOFILE=65536` or higher for high-concurrency deployments.
 
-# Run with basic configuration
-docker run -d \
-  --name rs3gw \
-  -p 9000:9000 \
-  -e RS3GW_STORAGE_ROOT=/data \
-  -e RS3GW_BIND_ADDR=0.0.0.0:9000 \
-  -v /path/to/storage:/data \
-  rs3gw:latest
+---
+
+## 2. Data Directory Layout
+
+When rs3gw creates a bucket, it initializes the following directory structure under `<storage_root>/<bucket>/`:
+
+```
+<storage_root>/                        # RS3GW_STORAGE_ROOT (default: ./data)
+├── <bucket>/
+│   ├── objects/                        # Object data files (may be compressed)
+│   ├── metadata/                       # JSON metadata per object (ETag, content-type, user metadata)
+│   ├── sci_metadata/                   # HPC/AI scientific metadata
+│   ├── tags/                           # Object tagging (key-value JSON per object)
+│   ├── multipart/                      # In-progress multipart upload parts and manifests
+│   ├── bucket_tags.json                # Bucket-level tags
+│   └── bucket_policy.json              # Bucket policy document
+├── preprocessing/                      # Data preprocessing pipeline state
+├── training/                           # ML training manager state
+└── dedup/                              # Deduplication block store and index (when enabled)
 ```
 
-#### Docker Compose for Production
+**Notes:**
+- Object data in `objects/` may be compressed transparently when `RS3GW_COMPRESSION` is set. The compression algorithm is recorded in the per-object metadata.
+- The `multipart/` directory holds partial uploads. Abandoned uploads are garbage-collected after `RS3GW_MULTIPART_RETENTION_HOURS` (default: 168 hours = 7 days).
+- When versioning is enabled on a bucket, version metadata is tracked per-object in the metadata directory.
+- When `RS3GW_FSYNC=true`, every object write calls `sync_all()` before the final rename, ensuring data durability at the cost of write throughput.
 
-See `docker-compose.dev.yml` for a complete stack including:
-- rs3gw service
-- Prometheus for metrics
-- Grafana for dashboards
-- Jaeger for distributed tracing
-- MinIO for backend integration
+---
 
-```bash
-# Start the entire stack
-docker-compose -f docker-compose.dev.yml up -d
+## 3. Environment Variables Reference
 
-# View logs
-docker-compose -f docker-compose.dev.yml logs -f rs3gw
+All configuration can be supplied via environment variables with the `RS3GW_` prefix. Environment variables override values from the config file.
 
-# Stop the stack
-docker-compose -f docker-compose.dev.yml down
-```
+### Core Server
 
-### 2. Kubernetes Deployment (Recommended for Production)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_BIND_ADDR` | `0.0.0.0:9000` | Socket address to bind the HTTP server |
+| `RS3GW_STORAGE_ROOT` | `./data` | Root directory for all bucket data |
+| `RS3GW_DEFAULT_BUCKET` | `default` | Default bucket name for single-bucket mode |
+| `RS3GW_REQUEST_TIMEOUT` | `300` | Request timeout in seconds (0 = no timeout) |
+| `RS3GW_MAX_CONCURRENT` | `0` | Maximum concurrent requests (0 = unlimited) |
+| `RS3GW_FSYNC` | `false` | Call `sync_all()` on object files before rename; safer but slower |
+| `RS3GW_REGION` | `us-east-1` | AWS region identifier for SigV4 authentication |
+| `RS3GW_CHECKSUM_VALIDATION` | `false` | Validate checksums on read operations |
 
-#### Helm Chart Deployment
+### Authentication
 
-```bash
-# Add the Helm repository (if available)
-# helm repo add rs3gw https://charts.rs3gw.io
-# helm repo update
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_ACCESS_KEY` | *(empty)* | S3 access key. When empty, authentication is disabled (passthrough mode). |
+| `RS3GW_SECRET_KEY` | *(empty)* | S3 secret key. Both access and secret keys must be set to enable SigV4 auth. |
 
-# Install with default values
-helm install rs3gw ./k8s/helm/rs3gw
+### Compression
 
-# Install with custom values
-helm install rs3gw ./k8s/helm/rs3gw \
-  --set replicaCount=3 \
-  --set persistence.size=1Ti \
-  --set resources.requests.cpu=4 \
-  --set resources.requests.memory=16Gi
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_COMPRESSION` | `none` | Compression mode: `none`, `zstd`, `zstd:<level>` (1-22), or `lz4`. Aliases: `on`/`true`/`1` = zstd level 3; `off`/`false`/`0` = none. |
 
-# Upgrade the deployment
-helm upgrade rs3gw ./k8s/helm/rs3gw \
-  --set image.tag=v1.0.0
+### TLS
 
-# Uninstall
-helm uninstall rs3gw
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_TLS_CERT` | *(none)* | Path to TLS certificate file (PEM format) |
+| `RS3GW_TLS_KEY` | *(none)* | Path to TLS private key file (PEM format) |
 
-#### Kustomize Deployment
+### Connection Pool (outbound HTTP client)
 
-```bash
-# Deploy using kustomize
-kubectl apply -k k8s/
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_POOL_MAX_IDLE` | `32` | Maximum idle connections per host |
+| `RS3GW_POOL_IDLE_TIMEOUT` | `90` | Idle connection timeout in seconds |
+| `RS3GW_CONNECT_TIMEOUT` | `30` | Connection timeout in seconds |
+| `RS3GW_CLIENT_TIMEOUT` | `300` | Outbound request timeout in seconds |
 
-# Check deployment status
-kubectl get pods -l app=rs3gw
-kubectl get svc rs3gw
+### Object Cache
 
-# View logs
-kubectl logs -f deployment/rs3gw
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_CACHE_ENABLED` | `true` | Enable in-memory object cache |
+| `RS3GW_CACHE_MAX_SIZE_MB` | `256` | Maximum cache size in megabytes |
+| `RS3GW_CACHE_MAX_OBJECTS` | `10000` | Maximum number of cached objects |
+| `RS3GW_CACHE_TTL` | `300` | Cache entry TTL in seconds |
 
-### 3. Bare Metal / VM Deployment
+### S3 Select Cache
 
-#### System Requirements
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_SELECT_CACHE_ENABLED` | `true` | Enable S3 Select query result caching |
+| `RS3GW_SELECT_CACHE_MAX_ENTRIES` | `1000` | Maximum number of cached query results |
+| `RS3GW_SELECT_CACHE_MAX_MEMORY_MB` | `100` | Maximum memory for Select cache in MB |
+| `RS3GW_SELECT_CACHE_TTL` | `3600` | Default TTL for cached results in seconds |
 
-- **OS**: Linux (Ubuntu 20.04+, RHEL 8+, or equivalent)
-- **CPU**: 8+ cores for production workloads
-- **RAM**: 32+ GB
-- **Storage**: NVMe SSD recommended (10,000+ IOPS)
-- **Network**: 10 Gbps network interface
+### Throttling
 
-#### Installation Steps
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_THROTTLE_ENABLED` | `false` | Enable request throttling |
+| `RS3GW_THROTTLE_RPS` | `0` | Max requests per second per client (0 = unlimited) |
+| `RS3GW_THROTTLE_UPLOAD_MBPS` | `0` | Upload bandwidth limit in MB/s (0 = unlimited) |
+| `RS3GW_THROTTLE_DOWNLOAD_MBPS` | `0` | Download bandwidth limit in MB/s (0 = unlimited) |
 
-```bash
-# 1. Install Rust (if building from source)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
+### Quotas
 
-# 2. Clone the repository
-git clone https://github.com/cool-japan/rs3gw.git
-cd rs3gw
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_QUOTA_ENABLED` | `false` | Enable storage quotas |
+| `RS3GW_QUOTA_MAX_STORAGE_GB` | `0` | Default max storage per bucket in GB (0 = unlimited) |
+| `RS3GW_QUOTA_MAX_OBJECTS` | `0` | Default max objects per bucket (0 = unlimited) |
 
-# 3. Build the release binary
-cargo build --release
+### Deduplication
 
-# 4. Install the binary
-sudo cp target/release/rs3gw /usr/local/bin/
-sudo chmod +x /usr/local/bin/rs3gw
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_DEDUP_ENABLED` | `true` | Enable block-level deduplication |
+| `RS3GW_DEDUP_BLOCK_SIZE` | `65536` | Block size in bytes (64KB default) |
+| `RS3GW_DEDUP_ALGORITHM` | `fixed` | Chunking algorithm: `fixed` or `content-defined` / `cdc` |
+| `RS3GW_DEDUP_MIN_SIZE` | `131072` | Minimum object size for dedup in bytes (128KB); smaller objects skip dedup |
 
-# 5. Create systemd service
-sudo tee /etc/systemd/system/rs3gw.service > /dev/null <<EOF
-[Unit]
-Description=rs3gw Object Storage Gateway
-After=network.target
+### Zero-Copy Optimizations
 
-[Service]
-Type=simple
-User=rs3gw
-Group=rs3gw
-EnvironmentFile=/etc/rs3gw/rs3gw.env
-ExecStart=/usr/local/bin/rs3gw
-Restart=on-failure
-RestartSec=5s
-LimitNOFILE=65536
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_ZEROCOPY_DIRECT_IO` | `true` | Enable direct I/O for large reads |
+| `RS3GW_ZEROCOPY_DIRECT_IO_THRESHOLD` | `1048576` | Minimum file size in bytes to use direct I/O (1MB) |
+| `RS3GW_ZEROCOPY_SPLICE` | `true` | Enable splice(2) for zero-copy transfers (Linux) |
+| `RS3GW_ZEROCOPY_MMAP` | `true` | Enable mmap for metadata reads |
 
-[Install]
-WantedBy=multi-user.target
-EOF
+### Multipart Uploads
 
-# 6. Create configuration directory and user
-sudo useradd -r -s /bin/false rs3gw
-sudo mkdir -p /etc/rs3gw /var/lib/rs3gw/data
-sudo chown -R rs3gw:rs3gw /var/lib/rs3gw
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_MULTIPART_RETENTION_HOURS` | `168` | Hours before abandoned multipart uploads are garbage collected (7 days) |
 
-# 7. Create environment file
-sudo tee /etc/rs3gw/rs3gw.env > /dev/null <<EOF
-RS3GW_BIND_ADDR=0.0.0.0:9000
-RS3GW_STORAGE_ROOT=/var/lib/rs3gw/data
-RS3GW_ACCESS_KEY=your-access-key
-RS3GW_SECRET_KEY=your-secret-key
-RS3GW_COMPRESSION=zstd:3
-RS3GW_CACHE_ENABLED=true
-RS3GW_CACHE_MAX_SIZE_MB=4096
-RS3GW_DEDUP_ENABLED=true
-EOF
+### Cluster / Replication
 
-# 8. Start the service
-sudo systemctl daemon-reload
-sudo systemctl enable rs3gw
-sudo systemctl start rs3gw
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_CLUSTER_ENABLED` | `false` | Enable cluster mode |
+| `RS3GW_CLUSTER_NODE_ID` | *(auto)* | Unique node identifier |
+| `RS3GW_CLUSTER_ADVERTISE_ADDR` | `127.0.0.1:9001` | Address this node advertises to peers |
+| `RS3GW_CLUSTER_PORT` | `9001` | Cluster gossip port |
+| `RS3GW_CLUSTER_SEED_NODES` | *(empty)* | Comma-separated list of seed node addresses |
+| `RS3GW_REPLICATION_MODE` | `async` | Replication mode: `async`, `sync` (synchronous), or `quorum` |
+| `RS3GW_REPLICATION_FACTOR` | `2` | Number of replicas per object |
 
-# 9. Check status
-sudo systemctl status rs3gw
-sudo journalctl -u rs3gw -f
+### gRPC Server
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_GRPC_ENABLED` | `false` | Enable the gRPC interface (Arrow Flight / streaming) |
+| `RS3GW_GRPC_PORT` | `50051` | gRPC server port |
+| `RS3GW_GRPC_MAX_MESSAGE_SIZE` | `67108864` | Maximum message size in bytes (64MB) |
+| `RS3GW_GRPC_TLS_CERT` | *(none)* | Path to gRPC TLS certificate (PEM) |
+| `RS3GW_GRPC_TLS_KEY` | *(none)* | Path to gRPC TLS private key (PEM) |
+
+### Resource Management
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_MIN_THREADS` | `4` | Minimum worker threads |
+| `RS3GW_MAX_THREADS` | `num_cpus * 4` | Maximum worker threads |
+| `RS3GW_TARGET_CPU` | `0.75` | Target CPU utilization (0.0-1.0) for adaptive scaling |
+| `RS3GW_MEMORY_THRESHOLD` | `0.85` | Memory pressure threshold (0.0-1.0); triggers back-pressure |
+| `RS3GW_ADJUSTMENT_INTERVAL` | `5` | Resource adjustment check interval in seconds |
+| `RS3GW_ADAPTIVE_RATE_LIMIT` | `true` | Enable adaptive rate limiting based on system load |
+| `RS3GW_INITIAL_RATE_LIMIT` | `1000` | Initial rate limit (requests/sec) |
+| `RS3GW_MIN_RATE_LIMIT` | `100` | Minimum rate limit (requests/sec) |
+| `RS3GW_MAX_RATE_LIMIT` | `10000` | Maximum rate limit (requests/sec) |
+| `RS3GW_LOAD_SHEDDING_THRESHOLD` | `0.95` | Load shedding threshold (0.0-1.0); excess requests are rejected |
+
+### Profiling
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RS3GW_PROFILING_CPU` | `false` | Enable CPU profiling |
+| `RS3GW_PROFILING_MEMORY` | `false` | Enable memory profiling |
+| `RS3GW_PROFILING_IO` | `false` | Enable I/O profiling |
+| `RS3GW_PROFILING_CPU_RATE` | `100` | CPU sample rate in Hz |
+| `RS3GW_PROFILING_MEMORY_RATE` | `1000` | Memory sample rate (every Nth allocation) |
+| `RS3GW_PROFILING_INTERVAL` | `60` | Profile collection interval in seconds |
+| `RS3GW_PROFILING_MAX_PROFILES` | `24` | Maximum retained profile snapshots |
+| `RS3GW_PROFILING_OUTPUT_DIR` | *(none)* | Directory for profile output files |
+
+### Logging
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | `info` | Tracing filter (`tracing-subscriber` EnvFilter syntax). Example: `rs3gw=debug,tower_http=info` |
+
+---
+
+## 4. Configuration File
+
+rs3gw supports TOML configuration files in addition to environment variables. The load priority is:
+
+1. **Config file** (`rs3gw.toml` in the working directory, or path from `--config`)
+2. **Environment variables** (override file values)
+3. **Defaults**
+
+Example `rs3gw.toml`:
+
+```toml
+bind_addr = "0.0.0.0:9000"
+storage_root = "/data/rs3gw"
+default_bucket = "default"
+access_key = "AKIAIOSFODNN7EXAMPLE"
+secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+compression = "zstd"
+request_timeout_secs = 300
+max_concurrent_requests = 500
+multipart_retention_hours = 168
+fsync = false
+
+[tls]
+cert_path = "/etc/rs3gw/tls/server.crt"
+key_path = "/etc/rs3gw/tls/server.key"
+
+[connection_pool]
+pool_max_idle_per_host = 32
+pool_idle_timeout_secs = 90
+connect_timeout_secs = 30
+request_timeout_secs = 300
+
+[dedup]
+enabled = true
+block_size = 65536
+
+[select_cache]
+enabled = true
+max_entries = 1000
+max_memory_mb = 100
+ttl_seconds = 3600
 ```
 
 ---
 
-## Security Best Practices
+## 5. TLS Configuration
 
-### 1. Authentication & Access Control
+### Direct TLS Termination
 
-#### Enable AWS Signature V4 Authentication
-
-```bash
-# Set access credentials
-export RS3GW_ACCESS_KEY="your-secure-access-key"
-export RS3GW_SECRET_KEY="your-secure-secret-key"
-
-# Never use empty credentials in production!
-```
-
-#### Configure ABAC (Attribute-Based Access Control)
-
-Create bucket policies with time windows and IP restrictions:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": "*",
-      "Action": ["s3:GetObject"],
-      "Resource": "arn:aws:s3:::public-bucket/*"
-    },
-    {
-      "Effect": "Deny",
-      "Principal": "*",
-      "Action": ["s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::production-data/*",
-      "Condition": {
-        "IpAddress": {
-          "aws:SourceIp": ["10.0.0.0/8", "192.168.0.0/16"]
-        },
-        "DateGreaterThan": {"aws:CurrentTime": "2024-01-01T09:00:00Z"},
-        "DateLessThan": {"aws:CurrentTime": "2024-01-01T17:00:00Z"}
-      }
-    }
-  ]
-}
-```
-
-### 2. TLS/HTTPS Configuration
-
-#### Generate TLS Certificates
+rs3gw supports native TLS via `rustls` (no OpenSSL dependency). To enable:
 
 ```bash
-# Self-signed certificate (development only)
-openssl req -x509 -newkey rsa:4096 -nodes \
-  -keyout server-key.pem \
-  -out server-cert.pem \
-  -days 365 \
-  -subj "/CN=rs3gw.example.com"
-
-# Production: Use Let's Encrypt
-certbot certonly --standalone -d rs3gw.example.com
+export RS3GW_TLS_CERT=/etc/rs3gw/tls/server.crt
+export RS3GW_TLS_KEY=/etc/rs3gw/tls/server.key
 ```
 
-#### Enable TLS in rs3gw
+Both variables must be set; otherwise the server starts in plain HTTP mode. Certificates must be PEM-encoded. The certificate file should contain the full chain (leaf certificate + intermediates).
 
-```bash
-export RS3GW_TLS_CERT="/path/to/server-cert.pem"
-export RS3GW_TLS_KEY="/path/to/server-key.pem"
+**Certificate rotation** requires a server restart. rs3gw does not currently watch for certificate file changes at runtime.
+
+The gRPC interface has independent TLS configuration via `RS3GW_GRPC_TLS_CERT` and `RS3GW_GRPC_TLS_KEY`, allowing different certificates for the HTTP and gRPC endpoints.
+
+### Reverse Proxy TLS Termination (recommended)
+
+For most production deployments, terminating TLS at a reverse proxy is preferred:
+
+```
+Client --TLS--> nginx/caddy/HAProxy --HTTP--> rs3gw (127.0.0.1:9000)
 ```
 
-### 3. Encryption at Rest
+**Benefits:**
+- Automatic certificate renewal (e.g., via certbot/ACME)
+- No server restart for certificate rotation
+- Centralized TLS policy management
+- HTTP/2 and HTTP/3 support at the proxy layer
 
-```bash
-# Enable AES-256-GCM encryption
-export RS3GW_ENCRYPTION_ENABLED="true"
-export RS3GW_ENCRYPTION_ALGORITHM="aes-256-gcm"
-
-# Key rotation (recommended: monthly)
-# Use rs3ctl to rotate encryption keys
-rs3ctl maintenance rotate-keys --backup-old-keys
-```
-
-### 4. Audit Logging
-
-```bash
-# Enable comprehensive audit logging
-export RS3GW_AUDIT_ENABLED="true"
-export RS3GW_AUDIT_LOG_PATH="/var/log/rs3gw/audit.log"
-export RS3GW_AUDIT_ROTATION_SIZE="100MB"
-export RS3GW_AUDIT_SYSLOG_ENABLED="true"
-export RS3GW_AUDIT_SYSLOG_ENDPOINT="syslog.example.com:514"
-
-# Enable S3 log forwarding for long-term retention
-export RS3GW_AUDIT_S3_ENABLED="true"
-export RS3GW_AUDIT_S3_BUCKET="audit-logs"
-export RS3GW_AUDIT_S3_PREFIX="rs3gw/"
-```
-
-### 5. Network Security
-
-#### Firewall Configuration
-
-```bash
-# Allow only necessary ports
-sudo ufw allow 9000/tcp  # rs3gw API
-sudo ufw allow 9001/tcp  # Cluster communication (if cluster mode enabled)
-sudo ufw deny from any to any
-sudo ufw enable
-```
-
-#### Reverse Proxy with Nginx
+Example nginx upstream configuration:
 
 ```nginx
-upstream rs3gw_backend {
+upstream rs3gw {
     server 127.0.0.1:9000;
     keepalive 64;
 }
@@ -293,1472 +312,331 @@ server {
     listen 443 ssl http2;
     server_name s3.example.com;
 
-    ssl_certificate /etc/letsencrypt/live/s3.example.com/fullchain.pem;
+    ssl_certificate     /etc/letsencrypt/live/s3.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/s3.example.com/privkey.pem;
 
-    # Security headers
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header X-Content-Type-Options "nosniff" always;
-
-    # Increase timeouts for large uploads
-    client_max_body_size 10G;
-    client_body_timeout 600s;
-    proxy_read_timeout 600s;
-    proxy_send_timeout 600s;
+    client_max_body_size 5G;
 
     location / {
-        proxy_pass http://rs3gw_backend;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
+        proxy_pass http://rs3gw;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
     }
 }
 ```
 
 ---
 
-## High Availability Setup
+## 6. Compression Configuration
 
-### 1. Multi-Node Cluster Configuration
+### Modes
 
-```bash
-# Node 1
-export RS3GW_CLUSTER_ENABLED="true"
-export RS3GW_CLUSTER_NODE_ID="node-1"
-export RS3GW_CLUSTER_ADVERTISE_ADDR="10.0.1.10:9001"
-export RS3GW_CLUSTER_PORT="9001"
-export RS3GW_CLUSTER_SEED_NODES="10.0.1.11:9001,10.0.1.12:9001"
-export RS3GW_REPLICATION_MODE="quorum"
-export RS3GW_REPLICATION_FACTOR="3"
+| Mode | Env Value | CPU Cost | Typical Ratio | Best For |
+|------|-----------|----------|---------------|----------|
+| None | `none`, `off`, `false`, `0` | Zero | 1:1 | Pre-compressed data (images, video, archives) |
+| Zstd (default level) | `zstd`, `on`, `true`, `1` | Medium | 2-5x | General purpose; best ratio-to-speed tradeoff |
+| Zstd (tuned) | `zstd:<level>` (1-22) | Low to High | Varies | Fine-grained control per workload |
+| LZ4 | `lz4` | Very low | 1.5-3x | Latency-sensitive reads; fastest decompression |
 
-# Node 2
-export RS3GW_CLUSTER_ENABLED="true"
-export RS3GW_CLUSTER_NODE_ID="node-2"
-export RS3GW_CLUSTER_ADVERTISE_ADDR="10.0.1.11:9001"
-export RS3GW_CLUSTER_PORT="9001"
-export RS3GW_CLUSTER_SEED_NODES="10.0.1.10:9001,10.0.1.12:9001"
-export RS3GW_REPLICATION_MODE="quorum"
-export RS3GW_REPLICATION_FACTOR="3"
+### Zstd Level Tuning
 
-# Node 3
-export RS3GW_CLUSTER_ENABLED="true"
-export RS3GW_CLUSTER_NODE_ID="node-3"
-export RS3GW_CLUSTER_ADVERTISE_ADDR="10.0.1.12:9001"
-export RS3GW_CLUSTER_PORT="9001"
-export RS3GW_CLUSTER_SEED_NODES="10.0.1.10:9001,10.0.1.11:9001"
-export RS3GW_REPLICATION_MODE="quorum"
-export RS3GW_REPLICATION_FACTOR="3"
-```
+| Level | Compression Speed | Decompression Speed | Ratio |
+|-------|-------------------|---------------------|-------|
+| 1 | Very fast | Very fast | Lower |
+| 3 (default) | Fast | Very fast | Good |
+| 6 | Medium | Very fast | Better |
+| 12 | Slow | Very fast | High |
+| 19-22 | Very slow | Very fast | Maximum |
 
-### 2. Load Balancing
+Decompression speed is largely independent of the compression level. Higher levels only cost more on writes, not on reads.
 
-#### HAProxy Configuration
+### Workload Recommendations
 
-```haproxy
-global
-    maxconn 50000
-    log /dev/log local0
-    user haproxy
-    group haproxy
-    daemon
+- **AI/ML model checkpoints** (large, compressible tensors): `zstd:3` (default) provides a strong balance of throughput and savings.
+- **HPC simulation output** (binary, moderately compressible): `zstd:1` for throughput priority, `zstd:6` for storage savings.
+- **Images, video, pre-compressed archives**: `none` -- attempting to compress already-compressed data wastes CPU and may increase file size.
+- **Log ingestion / JSON data**: `zstd:5` or higher for excellent ratios on text-like data.
+- **Ultra-low-latency reads**: `lz4` decompresses at near-memory-bandwidth speeds.
 
-defaults
-    log global
-    mode http
-    option httplog
-    option dontlognull
-    timeout connect 5000
-    timeout client 600000
-    timeout server 600000
-
-frontend s3_frontend
-    bind *:9000
-    bind *:443 ssl crt /etc/haproxy/certs/
-    default_backend s3_backend
-
-backend s3_backend
-    balance roundrobin
-    option httpchk GET /health
-    http-check expect status 200
-    server node1 10.0.1.10:9000 check inter 5s
-    server node2 10.0.1.11:9000 check inter 5s
-    server node3 10.0.1.12:9000 check inter 5s
-
-listen stats
-    bind *:8404
-    stats enable
-    stats uri /stats
-    stats refresh 5s
-    stats admin if TRUE
-```
-
-### 3. Cross-Region Replication
+### Usage
 
 ```bash
-# Configure replication from US-WEST to US-EAST
-rs3ctl replication configure my-bucket \
-  --destination us-east-1.example.com:9000 \
-  --filter prefix=important/ \
-  --wan-optimization \
-  --compression \
-  --bandwidth-limit 100MB/s
+export RS3GW_COMPRESSION=zstd        # Default level 3
+export RS3GW_COMPRESSION=zstd:6      # Level 6 for better ratio
+export RS3GW_COMPRESSION=lz4         # Fastest decompression
+export RS3GW_COMPRESSION=none        # No compression
 ```
 
 ---
 
-## Monitoring & Observability
+## 7. Troubleshooting
 
-### 1. Prometheus Integration
+### ENOSPC: Disk Full Recovery
 
-#### Prometheus Configuration
+**Symptoms**: PUT operations fail with 500 errors. Logs show "No space left on device".
 
-```yaml
-# prometheus.yml
-global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+**Immediate recovery**:
+1. Free space by deleting temporary files or expanding the volume.
+2. Clean up abandoned multipart uploads (see Multipart Cleanup below).
+3. If dedup is enabled, run a dedup garbage collection pass.
+4. rs3gw does not need a restart after freeing space -- it will resume accepting writes immediately.
 
-scrape_configs:
-  - job_name: 'rs3gw'
-    static_configs:
-      - targets:
-        - 'rs3gw-node1:9000'
-        - 'rs3gw-node2:9000'
-        - 'rs3gw-node3:9000'
-    metrics_path: '/metrics'
-    scrape_interval: 5s
-```
+**Prevention**:
+- Monitor the `rs3gw_storage_bytes` gauge and alert at 80-85% capacity.
+- Set quotas (`RS3GW_QUOTA_ENABLED=true`, `RS3GW_QUOTA_MAX_STORAGE_GB`) to enforce per-bucket limits.
+- Use lifecycle/tiering policies to move cold data to cheaper or larger volumes.
 
-#### Key Metrics to Monitor
+### Permission Denied
 
-- **Request Rate**: `rs3gw_requests_total`
-- **Latency**: `rs3gw_request_duration_seconds`
-- **Error Rate**: `rs3gw_errors_total`
-- **Storage Usage**: `rs3gw_storage_bytes_total`
-- **Object Count**: `rs3gw_objects_total`
-- **Cache Hit Rate**: `rs3gw_cache_hits_total / rs3gw_cache_requests_total`
+**Symptoms**: Operations fail with "Permission denied" in logs.
 
-### 2. Grafana Dashboards
-
-Pre-built dashboards are available in `deploy/grafana/`:
-- **Overview Dashboard**: Request rates, latency, error rates
-- **Storage Dashboard**: Storage usage, object counts, bucket statistics
-- **Performance Dashboard**: Cache hit rates, deduplication savings, throughput
-- **Cluster Dashboard**: Node health, replication lag, consistency
-
-### 3. Distributed Tracing with Jaeger
-
+**Diagnosis and fix**:
 ```bash
-# Configure OpenTelemetry export
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://jaeger:4317"
-export OTEL_TRACES_SAMPLER="traceidratio"
-export OTEL_TRACES_SAMPLER_ARG="0.1"  # Sample 10% of traces
-export RS3GW_SERVICE_NAME="rs3gw-production"
-export RS3GW_SERVICE_VERSION="1.0.0"
-export RS3GW_ENVIRONMENT="production"
+# Check ownership of storage root
+ls -la /path/to/storage_root/
+
+# The rs3gw process user must own the storage root recursively
+chown -R rs3gw:rs3gw /path/to/storage_root/
+
+# Minimum permissions: directories 755, files 644
+find /path/to/storage_root -type d -exec chmod 755 {} \;
+find /path/to/storage_root -type f -exec chmod 644 {} \;
 ```
 
-### 4. Observability API Endpoints
+For TLS certificates, ensure the rs3gw process user has read access to the certificate and key files (typically `chmod 640`).
 
-rs3gw provides dedicated observability endpoints:
+### Corrupt Metadata: Detection and Recovery
 
+**Symptoms**: GET/HEAD returns unexpected results. Logs show JSON parse errors for metadata files.
+
+**Detection**:
 ```bash
-# Get profiling data (CPU, memory, I/O)
-curl http://rs3gw:9000/api/observability/profiling
+# Find zero-byte metadata files (likely from incomplete writes)
+find /path/to/storage_root -path "*/metadata/*.json" -size 0
 
-# Get profiling data in pprof format for flamegraphs
-curl http://rs3gw:9000/api/observability/profiling?format=pprof
-
-# Get business metrics
-curl http://rs3gw:9000/api/observability/business-metrics
-
-# Get detected anomalies
-curl http://rs3gw:9000/api/observability/anomalies
-
-# Filter anomalies by severity
-curl http://rs3gw:9000/api/observability/anomalies?severity=high
-
-# Get resource manager statistics
-curl http://rs3gw:9000/api/observability/resources
-
-# Comprehensive health check
-curl http://rs3gw:9000/api/observability/health
+# Validate all metadata JSON
+find /path/to/storage_root -path "*/metadata/*.json" -exec sh -c \
+  'python3 -m json.tool "$1" > /dev/null 2>&1 || echo "CORRUPT: $1"' _ {} \;
 ```
 
-### 5. Alerts
+**Recovery**:
+- For corrupt metadata with intact object data: delete the metadata file and re-PUT the object.
+- Enable `RS3GW_FSYNC=true` to prevent metadata corruption caused by unexpected power loss. This calls `sync_all()` before renaming files, ensuring data reaches stable storage.
+- Enable `RS3GW_CHECKSUM_VALIDATION=true` to detect corruption on read and return clear errors rather than serving bad data.
 
-#### Prometheus Alert Rules
+### Multipart Upload Cleanup
 
-```yaml
-# alerts.yml
-groups:
-  - name: rs3gw_alerts
-    interval: 30s
-    rules:
-      - alert: HighErrorRate
-        expr: rate(rs3gw_errors_total[5m]) > 0.05
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "High error rate detected"
-          description: "Error rate is {{ $value }} errors/sec"
+Abandoned multipart uploads consume disk space in `<bucket>/multipart/`.
 
-      - alert: HighLatency
-        expr: histogram_quantile(0.99, rate(rs3gw_request_duration_seconds_bucket[5m])) > 1.0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High latency detected"
-          description: "P99 latency is {{ $value }}s"
+**Automatic GC**: rs3gw garbage-collects multipart uploads older than `RS3GW_MULTIPART_RETENTION_HOURS` (default: 168 hours = 7 days).
 
-      - alert: LowDiskSpace
-        expr: (rs3gw_storage_bytes_total / 1e12) > 0.9 * rs3gw_storage_capacity_bytes
-        for: 15m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Low disk space"
-          description: "Storage usage is at {{ $value }}%"
+**Manual cleanup**:
+```bash
+# List multipart upload directories older than 7 days
+find /path/to/storage_root/*/multipart -mindepth 1 -maxdepth 1 -type d -mtime +7
 
-      - alert: NodeDown
-        expr: up{job="rs3gw"} == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "rs3gw node is down"
-          description: "Node {{ $labels.instance }} has been down for >1 minute"
+# Remove them
+find /path/to/storage_root/*/multipart -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \;
 ```
+
+**Tuning**: For workloads with many large multipart uploads, reduce retention to reclaim space faster:
+```bash
+export RS3GW_MULTIPART_RETENTION_HOURS=24  # 1 day instead of 7
+```
+
+### Performance Tuning
+
+**High latency on reads**:
+- Ensure `RS3GW_CACHE_ENABLED=true` (default) and increase `RS3GW_CACHE_MAX_SIZE_MB` if the cache hit rate (`rs3gw_cache_hit_rate` metric) is below 0.5.
+- Verify zero-copy is active: `RS3GW_ZEROCOPY_SPLICE=true` and `RS3GW_ZEROCOPY_DIRECT_IO=true` (both default to true).
+- Lower `RS3GW_ZEROCOPY_DIRECT_IO_THRESHOLD` below 1MB if your workload has many medium-sized objects.
+
+**High latency on writes**:
+- Switch to `RS3GW_COMPRESSION=lz4` instead of `zstd` if CPU is the bottleneck (check system CPU utilization).
+- Set `RS3GW_FSYNC=false` (default) unless your durability requirements mandate fsync on every write.
+- Increase `RS3GW_MAX_CONCURRENT` to allow more parallel writes if disk I/O is not saturated.
+
+**Request queuing / 503 errors**:
+- Increase `RS3GW_MAX_CONCURRENT` if the server is rejecting requests due to the concurrency limit (default 0 = unlimited).
+- Tune `RS3GW_REQUEST_TIMEOUT` to shed stuck requests (default 300s may be too generous for some workloads).
+- The adaptive rate limiter (`RS3GW_ADAPTIVE_RATE_LIMIT=true`, default) automatically adjusts between `RS3GW_MIN_RATE_LIMIT` (100) and `RS3GW_MAX_RATE_LIMIT` (10000) based on system load.
+- Load shedding activates at `RS3GW_LOAD_SHEDDING_THRESHOLD` (default 0.95) -- excess requests receive 503.
+
+**Memory pressure**:
+- Reduce `RS3GW_CACHE_MAX_SIZE_MB` and `RS3GW_SELECT_CACHE_MAX_MEMORY_MB`.
+- Adjust `RS3GW_MEMORY_THRESHOLD` (default 0.85) to trigger back-pressure earlier.
+- Disable dedup for small deployments: `RS3GW_DEDUP_ENABLED=false` eliminates the in-memory dedup index.
 
 ---
 
-## Backup & Disaster Recovery
+## 8. Monitoring
 
-### 1. Point-in-Time Snapshots
+### Prometheus Metrics Endpoint
+
+rs3gw exposes Prometheus metrics at `GET /metrics`. This endpoint does not require authentication.
 
 ```bash
-# Create a snapshot
-rs3ctl backup create --bucket my-bucket --snapshot-id snapshot-20240101
-
-# List snapshots
-rs3ctl backup list --bucket my-bucket
-
-# Restore from snapshot
-rs3ctl backup restore --bucket my-bucket --snapshot-id snapshot-20240101
-
-# Delete old snapshots
-rs3ctl backup cleanup --bucket my-bucket --retention-days 30
+curl http://localhost:9000/metrics
 ```
 
-### 2. Automated Backup Schedule
+Background metrics collection for predictive analytics runs every 60 seconds automatically, recording storage size, request rate, and bandwidth.
 
-```bash
-# Create systemd timer for daily backups
-sudo tee /etc/systemd/system/rs3gw-backup.service > /dev/null <<EOF
+### Key Metrics
+
+#### Request Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rs3gw_requests_total` | Counter | `operation`, `status` | Total requests by S3 operation and HTTP status class (2xx/3xx/4xx/5xx) |
+| `rs3gw_request_duration_ms` | Histogram | `operation` | Request latency distribution in milliseconds. Buckets: 0.1, 1, 5, 10, 50, 100, 500, 1000, 5000, 60000 ms |
+| `rs3gw_bytes_total` | Counter | `direction` | Bytes transferred (upload/download) |
+| `rs3gw_errors_total` | Counter | `error_type`, `operation` | Errors by type and S3 operation |
+
+#### Storage Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `rs3gw_buckets_total` | Gauge | Number of buckets |
+| `rs3gw_objects_total` | Gauge | Total object count |
+| `rs3gw_storage_bytes` | Gauge | Total storage used in bytes |
+| `rs3gw_object_size_bytes` | Histogram | Object size distribution. Buckets: 1KB, 64KB, 1MB, 10MB, 100MB, 1GB |
+
+#### Cache Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rs3gw_cache_operations_total` | Counter | `operation`, `result` | Cache operations (hit/miss) |
+| `rs3gw_cache_size_bytes` | Gauge | | Current cache memory usage |
+| `rs3gw_cache_objects_total` | Gauge | | Number of cached objects |
+| `rs3gw_cache_hit_rate` | Gauge | | Cache hit rate (0.0-1.0) |
+
+#### Compression and Deduplication
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rs3gw_compression_original_bytes` | Counter | `algorithm` | Original bytes before compression |
+| `rs3gw_compression_compressed_bytes` | Counter | `algorithm` | Bytes after compression |
+| `rs3gw_compression_ratio` | Histogram | `algorithm` | Compression ratio (compressed/original). Buckets: 0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.25 |
+| `rs3gw_dedup_total_bytes_saved` | Counter | | Total bytes saved by deduplication |
+| `rs3gw_dedup_operations_total` | Counter | | Total dedup operations |
+| `rs3gw_dedup_savings_ratio` | Histogram | | Dedup savings ratio. Buckets: 0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0 |
+
+#### Multipart Upload Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `rs3gw_multipart_parts` | Histogram | Parts per multipart upload |
+| `rs3gw_multipart_size_bytes` | Histogram | Total size of completed multipart uploads |
+| `rs3gw_multipart_duration_ms` | Histogram | Time to complete a multipart upload |
+
+#### Cluster Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `rs3gw_cluster_nodes_total` | Gauge | Total cluster nodes |
+| `rs3gw_cluster_healthy_nodes` | Gauge | Healthy cluster nodes |
+| `rs3gw_cluster_replication_lag_ms` | Gauge | Replication lag in milliseconds |
+| `rs3gw_cluster_operations_total` | Counter | Cluster operations (labels: `operation`, `status`) |
+
+#### Storage Class Transitions
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rs3gw_storage_class_transitions_total` | Counter | `from_class`, `to_class` | Number of storage class transitions |
+| `rs3gw_storage_class_transitioned_bytes` | Counter | `from_class`, `to_class` | Bytes moved between storage classes |
+
+#### Batch Job Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rs3gw_batch_jobs_total` | Counter | `job_type`, `status` | Total batch jobs executed |
+| `rs3gw_batch_objects_processed` | Counter | `job_type`, `status` | Objects processed by batch jobs |
+
+### Recommended Alerts
+
+| Alert | PromQL Condition | Severity |
+|-------|------------------|----------|
+| High error rate | `rate(rs3gw_errors_total[5m]) > 1` | Warning |
+| Disk nearly full | `rs3gw_storage_bytes / <total_capacity> > 0.85` | Critical |
+| High P99 latency | `histogram_quantile(0.99, rate(rs3gw_request_duration_ms_bucket[5m])) > 5000` | Warning |
+| Low cache hit rate | `rs3gw_cache_hit_rate < 0.5` | Info |
+| Replication lag | `rs3gw_cluster_replication_lag_ms > 10000` | Warning |
+| No healthy peers | `rs3gw_cluster_healthy_nodes < 2` (when cluster is enabled) | Critical |
+| High compression ratio | `histogram_quantile(0.95, rs3gw_compression_ratio) > 1.0` | Info (data expanding, consider `none`) |
+
+### Grafana Dashboard
+
+A pre-built Grafana dashboard is available at [`docs/grafana-dashboard.json`](grafana-dashboard.json). To import:
+
+1. Open Grafana and navigate to **Dashboards > Import**.
+2. Upload or paste the contents of `docs/grafana-dashboard.json`.
+3. Select your Prometheus data source.
+4. The dashboard includes panels for request rate, latency percentiles, error rate, storage usage, cache hit rate, compression ratio, dedup savings, and cluster health.
+
+See also [`docs/prometheus.md`](prometheus.md) for Prometheus scrape configuration.
+
+---
+
+## 9. Deployment Examples
+
+### systemd Unit File
+
+```ini
 [Unit]
-Description=rs3gw Daily Backup
-After=network.target
+Description=rs3gw S3-compatible Object Storage Gateway
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
 User=rs3gw
-ExecStart=/usr/local/bin/rs3ctl backup create --all-buckets --snapshot-id daily-\$(date +\%Y\%m\%d)
-EOF
-
-sudo tee /etc/systemd/system/rs3gw-backup.timer > /dev/null <<EOF
-[Unit]
-Description=rs3gw Daily Backup Timer
-Requires=rs3gw-backup.service
-
-[Timer]
-OnCalendar=daily
-OnCalendar=02:00
-Persistent=true
+Group=rs3gw
+Environment=RS3GW_BIND_ADDR=0.0.0.0:9000
+Environment=RS3GW_STORAGE_ROOT=/data/rs3gw
+Environment=RS3GW_COMPRESSION=zstd
+Environment=RS3GW_MAX_CONCURRENT=500
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/rs3gw/env
+ExecStart=/usr/local/bin/rs3gw
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+TimeoutStopSec=40
 
 [Install]
-WantedBy=timers.target
-EOF
-
-sudo systemctl enable rs3gw-backup.timer
-sudo systemctl start rs3gw-backup.timer
+WantedBy=multi-user.target
 ```
 
-### 3. Cross-Region Backup
+**Key settings:**
+- `LimitNOFILE=65536`: High file descriptor limit for concurrent connections.
+- `TimeoutStopSec=40`: Allows the 30-second in-flight request drain timeout plus margin.
+- `EnvironmentFile=-/etc/rs3gw/env`: Load secrets (access key, secret key) from a separate file with restricted permissions (`chmod 600`).
+
+### Docker
 
 ```bash
-# Replicate backups to remote site
-rs3ctl backup replicate \
-  --source-bucket my-bucket \
-  --destination s3://backup-bucket/rs3gw/ \
-  --destination-endpoint https://s3.remote.example.com
+docker run -d \
+  --name rs3gw \
+  -p 9000:9000 \
+  -e RS3GW_STORAGE_ROOT=/data \
+  -e RS3GW_BIND_ADDR=0.0.0.0:9000 \
+  -e RS3GW_COMPRESSION=zstd \
+  -e RS3GW_ACCESS_KEY=myaccesskey \
+  -e RS3GW_SECRET_KEY=mysecretkey \
+  -v /host/data:/data \
+  rs3gw:latest
 ```
 
-### 4. Disaster Recovery Plan
+### Graceful Shutdown
 
-1. **Backup Verification**: Test restores monthly
-2. **RTO Target**: < 1 hour for critical data
-3. **RPO Target**: < 15 minutes (replication lag)
-4. **Multi-Region**: Maintain replicas in 2+ regions
-5. **Documentation**: Keep runbooks updated
+rs3gw handles `SIGINT` (Ctrl+C) and `SIGTERM` gracefully:
 
----
+1. The server stops accepting new connections.
+2. In-flight requests are allowed to complete (up to a 30-second drain timeout).
+3. The process exits cleanly.
 
-## Performance Optimization
-
-See [Performance Tuning Guide](performance_tuning.md) for detailed optimization recommendations.
-
-### Quick Wins
-
-```bash
-# Enable all performance features
-export RS3GW_COMPRESSION="zstd:3"
-export RS3GW_CACHE_ENABLED="true"
-export RS3GW_CACHE_MAX_SIZE_MB="8192"
-export RS3GW_DEDUP_ENABLED="true"
-export RS3GW_ZEROCOPY_DIRECT_IO="true"
-export RS3GW_ZEROCOPY_SPLICE="true"
-export RS3GW_ZEROCOPY_MMAP="true"
-```
-
----
-
-## Troubleshooting
-
-### 1. Common Issues
-
-#### High Memory Usage
-
-```bash
-# Check memory pressure
-curl http://rs3gw:9000/api/observability/resources
-
-# Reduce cache size
-export RS3GW_CACHE_MAX_SIZE_MB="2048"
-
-# Enable memory pressure detection
-export RS3GW_MEMORY_THRESHOLD="0.85"
-```
-
-#### Slow Requests
-
-```bash
-# Check profiling data
-curl http://rs3gw:9000/api/observability/profiling
-
-# Enable query optimization
-export RS3GW_SELECT_CACHE_ENABLED="true"
-export RS3GW_SELECT_PARALLEL_THRESHOLD="10485760"  # 10MB
-
-# Increase worker threads
-export RS3GW_MAX_THREADS="32"
-```
-
-#### Replication Lag
-
-```bash
-# Check replication metrics
-rs3ctl replication metrics
-
-# Increase batch size for WAN optimization
-rs3ctl replication configure my-bucket \
-  --batch-size 100 \
-  --wan-optimization \
-  --compression
-```
-
-### 2. Debugging Tools
-
-```bash
-# Enable debug logging
-export RUST_LOG="rs3gw=debug"
-
-# Get detailed profiling with flamegraphs
-curl http://rs3gw:9000/api/observability/profiling?format=pprof > cpu.pprof
-go tool pprof -http=:8080 cpu.pprof
-
-# Check anomaly detection
-curl http://rs3gw:9000/api/observability/anomalies?severity=high
-
-# Verify integrity
-rs3ctl maintenance check-integrity --bucket my-bucket
-```
-
-### 3. Support Resources
-
-- **Documentation**: https://rs3gw.io/docs
-- **GitHub Issues**: https://github.com/cool-japan/rs3gw/issues
-- **Community Forum**: https://community.rs3gw.io
-- **Security**: security@rs3gw.io
-
----
-
-## ML/AI Features & Dataset Preprocessing
-
-rs3gw v5.0.0+ includes comprehensive ML/AI features for model registry, dataset version control, and data preprocessing pipelines.
-
-### 1. Model Registry
-
-Store and version ML models with full lineage tracking:
-
-```bash
-# Register a model via S3 API (using special prefix)
-aws s3 cp model.pt s3://models/my-model/v1.0.0/model.pt \
-  --metadata framework=pytorch,architecture=resnet50,params=25M
-
-# List model versions
-rs3ctl models list my-model
-
-# Get model metadata
-rs3ctl models get my-model --version v1.0.0
-```
-
-### 2. Dataset Version Control
-
-Track dataset versions with split management and model lineage:
-
-```bash
-# Register a dataset
-rs3ctl datasets register training-data \
-  --description "ImageNet training subset" \
-  --author "ml-team"
-
-# Create a dataset version
-rs3ctl datasets version training-data \
-  --version v1.0.0 \
-  --uri s3://datasets/imagenet-train \
-  --samples 1000000
-
-# Add dataset splits
-rs3ctl datasets split training-data v1.0.0 \
-  --split train --uri s3://datasets/imagenet-train/train \
-  --samples 900000
-
-rs3ctl datasets split training-data v1.0.0 \
-  --split val --uri s3://datasets/imagenet-train/val \
-  --samples 100000
-
-# Link dataset to trained model
-rs3ctl datasets link training-data v1.0.0 \
-  --model my-model --model-version v1.0.0 \
-  --split train
-```
-
-### 3. Dataset Preprocessing API
-
-Create and apply preprocessing pipelines via HTTP API:
-
-#### Create a Preprocessing Pipeline
-
-```bash
-curl -X POST http://rs3gw:9000/api/preprocessing/pipelines \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "imagenet-pipeline",
-    "name": "ImageNet Preprocessing",
-    "version": "1.0.0",
-    "description": "Standard ImageNet preprocessing with normalization",
-    "steps": [
-      {
-        "id": "resize",
-        "step_type": "image_resize",
-        "config": {
-          "width": 224,
-          "height": 224,
-          "mode": "fit",
-          "filter": "lanczos3"
-        },
-        "cache": true
-      },
-      {
-        "id": "normalize",
-        "step_type": "image_normalization",
-        "config": {
-          "mean": [0.485, 0.456, 0.406],
-          "std": [0.229, 0.224, 0.225],
-          "normalize_range": true
-        },
-        "cache": true
-      }
-    ],
-    "metadata": {
-      "author": "ml-team",
-      "purpose": "inference"
-    }
-  }'
-```
-
-#### Apply Pipeline to Objects
-
-```bash
-# Apply preprocessing to a single image
-curl -X POST http://rs3gw:9000/api/preprocessing/apply \
-  -H "Content-Type: application/json" \
-  -d '{
-    "pipeline_id": "imagenet-pipeline",
-    "bucket": "raw-images",
-    "key": "photo.jpg",
-    "output_bucket": "processed-images",
-    "output_key": "photo_preprocessed.jpg"
-  }'
-```
-
-#### Manage Pipelines
-
-```bash
-# List all pipelines
-curl http://rs3gw:9000/api/preprocessing/pipelines
-
-# Get a specific pipeline
-curl http://rs3gw:9000/api/preprocessing/pipelines/imagenet-pipeline
-
-# Validate a pipeline definition
-curl -X POST http://rs3gw:9000/api/preprocessing/validate \
-  -H "Content-Type: application/json" \
-  -d '{ "pipeline": { ... } }'
-
-# Delete a pipeline
-curl -X DELETE http://rs3gw:9000/api/preprocessing/pipelines/imagenet-pipeline
-
-# Get cache statistics
-curl http://rs3gw:9000/api/preprocessing/cache/stats
-
-# Clear preprocessing cache
-curl -X POST http://rs3gw:9000/api/preprocessing/cache/clear
-```
-
-#### CLI Alternative
-
-```bash
-# Create a pipeline from JSON file
-rs3ctl preprocessing create examples/imagenet_pipeline.json
-
-# List pipelines
-rs3ctl preprocessing list
-
-# Apply pipeline
-rs3ctl preprocessing apply imagenet-pipeline \
-  --bucket raw-images \
-  --key photo.jpg \
-  --output-bucket processed-images \
-  --output-key photo_preprocessed.jpg
-
-# Validate pipeline
-rs3ctl preprocessing validate examples/pipeline.json
-```
-
-### 4. Production Configuration
-
-Configure preprocessing features in production:
-
-```bash
-# Environment variables
-export RS3GW_STORAGE_ROOT=/data
-export RS3GW_CACHE_ENABLED=true
-export RS3GW_CACHE_MAX_SIZE_MB=4096  # 4GB for preprocessing cache
-
-# In rs3gw.toml
-[preprocessing]
-cache_max_size_mb = 4096
-cache_max_objects = 50000
-default_cache_ttl_secs = 3600
-```
-
-### 5. Integration with ML Workflows
-
-#### PyTorch Integration Example
-
-```python
-import boto3
-import json
-
-s3 = boto3.client('s3', endpoint_url='http://rs3gw:9000')
-
-# Register model
-s3.upload_file(
-    'model.pt',
-    'models',
-    'my-model/v1.0.0/model.pt',
-    ExtraArgs={
-        'Metadata': {
-            'framework': 'pytorch',
-            'architecture': 'resnet50'
-        }
-    }
-)
-
-# Apply preprocessing via API
-import requests
-
-response = requests.post('http://rs3gw:9000/api/preprocessing/apply', json={
-    'pipeline_id': 'imagenet-pipeline',
-    'bucket': 'raw-images',
-    'key': 'batch/image_001.jpg',
-    'output_bucket': 'processed',
-    'output_key': 'batch/image_001.jpg'
-})
-
-print(f"Processed: {response.json()['output_key']}")
-```
-
-#### Batch Processing
-
-```bash
-# Batch preprocessing using GNU parallel
-aws s3 ls s3://raw-images/ --recursive | \
-  awk '{print $4}' | \
-  parallel -j 10 \
-    'curl -X POST http://rs3gw:9000/api/preprocessing/apply \
-      -H "Content-Type: application/json" \
-      -d "{\"pipeline_id\":\"imagenet-pipeline\",\"bucket\":\"raw-images\",\"key\":\"{}\",\"output_bucket\":\"processed\"}"'
-```
-
-### 6. Monitoring Preprocessing Operations
-
-```bash
-# Monitor cache performance
-curl http://rs3gw:9000/api/preprocessing/cache/stats
-
-# Watch preprocessing metrics in Grafana
-# Navigate to: http://grafana:3000/d/preprocessing-dashboard
-
-# Check preprocessing logs
-docker logs rs3gw 2>&1 | grep preprocessing
-
-# Monitor via observability API
-curl http://rs3gw:9000/api/observability/business-metrics | \
-  jq '.preprocessing'
-```
-
----
-
-### 7. Apache Arrow Flight for High-Performance Data Transfer
-
-rs3gw implements the Apache Arrow Flight protocol for zero-copy, high-performance data transfer with Python data science tools.
-
-#### Features
-
-- **Zero-copy data transfer** between rs3gw and Python/Spark/Dask
-- **19x faster** than REST API for listing operations
-- **4.3x faster** for large file downloads
-- **3.7x lower** memory usage
-- **Pandas DataFrame** integration with type hints
-- **Time-series** metadata for temporal analysis
-- **Categorical columns** for memory efficiency
-
-#### Configuration
-
-Arrow Flight runs on the same port as the main HTTP server (default: 9000):
-
-```bash
-export RS3GW_BIND_ADDR=0.0.0.0:9000
-# Arrow Flight automatically available on port 9000
-```
-
-#### Python Client Example
-
-```python
-from arrow_flight_pandas import RS3FlightClient
-import pandas as pd
-
-# Connect to rs3gw
-client = RS3FlightClient(host="rs3gw.example.com", port=9000)
-
-# List objects as optimized Pandas DataFrame
-df = client.list_objects_as_dataframe("my-bucket", prefix="data/")
-
-# DataFrame has optimized types:
-# - 'last_modified': datetime64[ns]
-# - 'content_type': category (90% memory reduction)
-# - 'key': index
-
-print(df.head())
-print(f"Total size: {df['size'].sum()} bytes")
-print(f"Content types: {df['content_type'].value_counts()}")
-```
-
-#### Spark Integration
-
-```python
-from pyspark.sql import SparkSession
-
-spark = SparkSession.builder.appName("RS3GW").getOrCreate()
-
-# Get data via Arrow Flight (zero-copy)
-df_pandas = client.list_objects_as_dataframe("data-lake")
-df_spark = spark.createDataFrame(df_pandas)
-
-# Distributed processing
-result = df_spark.groupBy("content_type").count()
-result.show()
-```
-
-#### Dask Integration
-
-```python
-import dask.dataframe as dd
-
-# Get large dataset via Arrow Flight
-df_pandas = client.list_objects_as_dataframe("big-data")
-
-# Create Dask DataFrame with automatic partitioning
-df_dask = dd.from_pandas(df_pandas, npartitions=10)
-
-# Distributed operations
-result = df_dask.groupby('content_type').size().compute()
-```
-
-#### Performance Benchmarks
-
-| Operation | REST API | Arrow Flight | Speedup |
-|-----------|----------|--------------|---------|
-| List 1000 objects | 850ms | 45ms | **19x** |
-| Download 100MB | 1200ms | 280ms | **4.3x** |
-| Memory usage | 450MB | 120MB | **3.7x** |
-
-*Benchmarks on local network, single-node rs3gw*
-
-#### Production Tips
-
-1. **Firewall Configuration**: Ensure port 9000 allows both HTTP and gRPC (Arrow Flight)
-2. **Load Balancing**: Arrow Flight works with standard HTTP/2 load balancers
-3. **TLS**: Arrow Flight automatically uses TLS when `RS3GW_TLS_CERT` is configured
-4. **Monitoring**: Arrow Flight operations appear in Prometheus metrics as `grpc_*`
-
-For detailed examples and API reference, see [examples/ARROW_FLIGHT_README.md](../examples/ARROW_FLIGHT_README.md).
-
----
-
-### 8. gRPC API for High-Performance Binary Protocol
-
-rs3gw provides a full gRPC API for low-latency, high-throughput operations using Protocol Buffers.
-
-#### Features
-
-- **Binary protocol** with 60% smaller message size vs. JSON
-- **HTTP/2 multiplexing** for concurrent streams
-- **Bi-directional streaming** for large file transfers
-- **Type-safe** clients in Python, Go, Java, and Rust
-- **40+ S3 operations** supported
-
-#### Configuration
-
-gRPC runs on the same port as the HTTP server:
-
-```bash
-export RS3GW_BIND_ADDR=0.0.0.0:9000
-# gRPC automatically available on port 9000
-```
-
-#### Client Libraries
-
-Pre-generated clients are available in `clients/` directory:
-
-**Python Client:**
-```python
-import grpc
-from proto import s3_pb2, s3_pb2_grpc
-
-# Connect to rs3gw
-channel = grpc.insecure_channel('rs3gw.example.com:9000')
-stub = s3_pb2_grpc.S3ServiceStub(channel)
-
-# List buckets
-response = stub.ListBuckets(s3_pb2.ListBucketsRequest())
-for bucket in response.buckets:
-    print(f"Bucket: {bucket.name}, Created: {bucket.creation_date}")
-
-# Upload object with streaming
-def generate_chunks():
-    with open('large-file.bin', 'rb') as f:
-        while chunk := f.read(1024 * 1024):  # 1MB chunks
-            yield s3_pb2.PutObjectRequest(
-                bucket='my-bucket',
-                key='large-file.bin',
-                body=chunk
-            )
-
-response = stub.PutObject(generate_chunks())
-print(f"Uploaded: {response.etag}")
-```
-
-**Go Client:**
-```go
-import (
-    "context"
-    pb "github.com/cool-japan/rs3gw/proto"
-    "google.golang.org/grpc"
-)
-
-conn, _ := grpc.Dial("rs3gw.example.com:9000", grpc.WithInsecure())
-defer conn.Close()
-client := pb.NewS3ServiceClient(conn)
-
-// List objects
-resp, _ := client.ListObjectsV2(context.Background(), &pb.ListObjectsV2Request{
-    Bucket: "my-bucket",
-    MaxKeys: 1000,
-})
-
-for _, obj := range resp.Contents {
-    fmt.Printf("Key: %s, Size: %d\n", obj.Key, obj.Size)
-}
-```
-
-#### Performance vs REST
-
-| Metric | REST API | gRPC | Improvement |
-|--------|----------|------|-------------|
-| Message size (JSON vs Protobuf) | 1000 bytes | 400 bytes | **60% smaller** |
-| Latency (p50) | 45ms | 12ms | **3.7x faster** |
-| Throughput (ops/sec) | 2500 | 8500 | **3.4x higher** |
-| Connection overhead | 150ms | 5ms | **30x faster** |
-
-#### Production Deployment
-
-**With TLS:**
-```bash
-export RS3GW_TLS_CERT="/path/to/cert.pem"
-export RS3GW_TLS_KEY="/path/to/key.pem"
-# gRPC automatically uses TLS
-```
-
-**Load Balancing (Nginx):**
-```nginx
-upstream grpc_backend {
-    server rs3gw-1:9000;
-    server rs3gw-2:9000;
-    server rs3gw-3:9000;
-}
-
-server {
-    listen 443 ssl http2;
-
-    ssl_certificate /etc/ssl/cert.pem;
-    ssl_certificate_key /etc/ssl/key.pem;
-
-    location / {
-        grpc_pass grpcs://grpc_backend;
-        grpc_set_header Host $host;
-    }
-}
-```
-
-For client generation scripts and examples, see `clients/` directory.
-
----
-
-### 9. WebSocket Event Streaming
-
-rs3gw provides real-time event notifications via WebSocket for monitoring object changes.
-
-#### Features
-
-- **Real-time notifications** for all S3 operations
-- **Event filtering** by bucket, prefix, and event type
-- **Connection multiplexing** with broadcast channels
-- **Automatic ping/pong** for connection health
-- **JSON event format** for easy parsing
-
-#### Configuration
-
-WebSocket endpoint is available at `/events/stream`:
-
-```bash
-# No special configuration required
-# WebSocket runs on same port as HTTP server
-```
-
-#### Connecting with JavaScript
-
-```javascript
-const ws = new WebSocket('ws://rs3gw.example.com:9000/events/stream?bucket=my-bucket&prefix=logs/');
-
-ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-
-    if (data.type === 'welcome') {
-        console.log('Connected:', data.message);
-    } else if (data.type === 'event') {
-        console.log('Event:', data.event_type, data.bucket, data.key);
-    }
-};
-
-ws.onerror = (error) => console.error('WebSocket error:', error);
-ws.onclose = () => console.log('WebSocket closed');
-```
-
-#### Connecting with Python
-
-```python
-import websocket
-import json
-
-def on_message(ws, message):
-    data = json.loads(message)
-    if data.get('type') == 'event':
-        print(f"Event: {data['event_type']} - {data['bucket']}/{data['key']}")
-
-ws = websocket.WebSocketApp(
-    "ws://rs3gw.example.com:9000/events/stream?bucket=my-bucket",
-    on_message=on_message
-)
-ws.run_forever()
-```
-
-#### Event Filtering
-
-Filter events using query parameters:
-
-```
-# Filter by bucket
-ws://rs3gw:9000/events/stream?bucket=my-bucket
-
-# Filter by prefix
-ws://rs3gw:9000/events/stream?bucket=my-bucket&prefix=logs/2025/
-
-# Filter by event types (comma-separated)
-ws://rs3gw:9000/events/stream?event_types=ObjectCreated,ObjectRemoved
-```
-
-#### Event Types
-
-- `ObjectCreated:Put` - Object uploaded
-- `ObjectCreated:Post` - Object created via POST
-- `ObjectCreated:Copy` - Object copied
-- `ObjectRemoved:Delete` - Object deleted
-- `ObjectRemoved:DeleteMarkerCreated` - Delete marker created
-- `BucketCreated` - Bucket created
-- `BucketRemoved` - Bucket deleted
-- `MultipartUploadStarted` - Multipart upload initiated
-- `MultipartUploadCompleted` - Multipart upload completed
-- `MultipartUploadAborted` - Multipart upload aborted
-
-#### Production Deployment
-
-**Nginx WebSocket Proxy:**
-```nginx
-location /events/stream {
-    proxy_pass http://rs3gw_backend;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_read_timeout 3600s;  # Keep connection alive
-}
-```
-
-**Monitoring:**
-```bash
-# Check active WebSocket connections
-curl http://rs3gw:9000/api/observability/resources | jq '.websocket_connections'
-
-# Monitor event broadcast rate
-curl http://rs3gw:9000/metrics | grep ws_events_total
-```
-
----
-
-### 10. GraphQL API for Flexible Queries
-
-rs3gw provides a GraphQL API for flexible metadata queries and aggregations.
-
-#### Features
-
-- **Flexible queries** - Request exactly the data you need
-- **Aggregations** - Storage statistics across buckets
-- **Schema introspection** - Self-documenting API
-- **GraphQL Playground** - Interactive query builder
-- **Batch operations** - Multiple queries in one request
-
-#### Endpoints
-
-- **Playground**: `GET http://rs3gw:9000/graphql` (interactive UI)
-- **Query**: `POST http://rs3gw:9000/graphql` (API endpoint)
-
-#### Example Queries
-
-**List Buckets with Statistics:**
-```graphql
-query {
-  buckets {
-    name
-    creationDate
-    objectCount
-    totalSize
-  }
-}
-```
-
-**Search Objects Across Buckets:**
-```graphql
-query {
-  searchObjects(pattern: "*.json", limit: 10) {
-    key
-    size
-    lastModified
-    contentType
-  }
-}
-```
-
-**Get Bucket Details:**
-```graphql
-query {
-  bucket(name: "my-bucket") {
-    name
-    objectCount
-    totalSize
-    tagging {
-      key
-      value
-    }
-    policy
-  }
-}
-```
-
-**Storage Statistics:**
-```graphql
-query {
-  storageStats {
-    totalBuckets
-    totalObjects
-    totalSize
-    averageObjectSize
-  }
-}
-```
-
-#### Using with cURL
-
-```bash
-curl -X POST http://rs3gw:9000/graphql \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "query { buckets { name objectCount totalSize } }"
-  }'
-```
-
-#### Using with Python
-
-```python
-import requests
-
-query = """
-query {
-  bucket(name: "my-bucket") {
-    name
-    objectCount
-    totalSize
-  }
-}
-"""
-
-response = requests.post(
-    'http://rs3gw:9000/graphql',
-    json={'query': query}
-)
-
-data = response.json()
-bucket = data['data']['bucket']
-print(f"Bucket: {bucket['name']}, Objects: {bucket['objectCount']}")
-```
-
-#### GraphQL Playground
-
-Access the interactive playground at `http://rs3gw:9000/graphql` in your browser:
-
-- **Autocomplete** - Schema-aware query building
-- **Documentation** - Built-in schema explorer
-- **History** - Query history tracking
-- **Variables** - Parameterized queries
-
-#### Production Configuration
-
-**Enable CORS for GraphQL:**
-```bash
-export RS3GW_CORS_ENABLED="true"
-export RS3GW_CORS_ALLOWED_ORIGINS="https://dashboard.example.com"
-```
-
-**Rate Limiting:**
-```bash
-export RS3GW_THROTTLE_RPS="100"  # Limit to 100 queries/sec
-```
-
-**Monitoring:**
-```bash
-# GraphQL query metrics
-curl http://rs3gw:9000/metrics | grep graphql_
-```
-
----
-
-## Advanced Performance Features
-
-### 1. S3 Select Query Result Caching
-
-rs3gw v5.1.0+ includes intelligent caching for S3 Select queries, providing 100x-1000x faster repeated queries.
-
-#### How It Works
-
-- **ETag-based cache keys**: Results are automatically invalidated when objects are modified
-- **LRU eviction**: Least recently used entries are evicted when cache is full
-- **TTL expiration**: Configurable time-to-live for cache entries (default: 1 hour)
-- **Memory limits**: Prevents cache from consuming excessive memory
-
-#### Configuration
-
-The S3 Select cache can be configured via environment variables:
-
-```bash
-# Enable/disable S3 Select result caching (default: true)
-export RS3GW_SELECT_CACHE_ENABLED="true"
-
-# Maximum number of cached query results (default: 1000)
-export RS3GW_SELECT_CACHE_MAX_ENTRIES="1000"
-
-# Maximum memory usage for cache in MB (default: 100MB)
-export RS3GW_SELECT_CACHE_MAX_MEMORY_MB="100"
-
-# Default TTL for cached results in seconds (default: 3600 = 1 hour)
-export RS3GW_SELECT_CACHE_TTL="3600"
-```
-
-**Recommended Production Settings**:
-
-```bash
-# High-traffic production environment
-export RS3GW_SELECT_CACHE_MAX_ENTRIES="5000"
-export RS3GW_SELECT_CACHE_MAX_MEMORY_MB="500"
-export RS3GW_SELECT_CACHE_TTL="7200"  # 2 hours
-
-# Low-memory environment
-export RS3GW_SELECT_CACHE_MAX_ENTRIES="500"
-export RS3GW_SELECT_CACHE_MAX_MEMORY_MB="50"
-export RS3GW_SELECT_CACHE_TTL="1800"  # 30 minutes
-```
-
-#### Cache Management API
-
-**Get cache statistics:**
-```bash
-curl http://rs3gw:9000/api/select/cache/stats
-
-{
-  "stats": {
-    "gets": 1500,
-    "hits": 1200,
-    "misses": 300,
-    "evictions": 5,
-    "expirations": 2,
-    "current_entries": 850,
-    "memory_bytes": 45678900,
-    "max_entries": 1000,
-    "max_memory_bytes": 104857600
-  },
-  "timestamp": "2026-01-02T12:34:56.789Z"
-}
-```
-
-**Clear all cached results:**
-```bash
-curl -X POST http://rs3gw:9000/api/select/cache/clear
-
-{
-  "status": "success",
-  "message": "Cache cleared successfully"
-}
-```
-
-**Invalidate cache for specific object:**
-```bash
-curl -X DELETE http://rs3gw:9000/api/select/cache/invalidate/etag123
-
-{
-  "status": "success",
-  "etag": "etag123",
-  "message": "Cache invalidated for object"
-}
-```
-
-#### Cache Headers
-
-S3 Select responses include a custom header indicating cache status:
-
-- `x-amz-select-cache: HIT` - Result served from cache
-- `x-amz-select-cache: MISS` - Query executed and result cached
-
-#### Performance Benefits
-
-| Scenario | Without Cache | With Cache | Improvement |
-|----------|---------------|------------|-------------|
-| Repeated query on 10MB CSV | 250ms | 2ms | **125x faster** |
-| Dashboard with 20 queries | 5 seconds | 40ms | **125x faster** |
-| Analytics on static dataset | 500ms | 3ms | **167x faster** |
-
-#### Use Cases
-
-- **Dashboards**: Frequent queries on relatively static data
-- **Analytics**: Repeated analysis on historical datasets
-- **Data Exploration**: Users running similar queries iteratively
-- **Reporting**: Scheduled reports with consistent queries
-
-#### Monitoring
-
-rs3gw exposes Prometheus metrics for S3 Select cache monitoring:
-
-**Available Metrics**:
-
-- `select_cache_hits` (counter) - Total number of cache hits
-- `select_cache_misses` (counter) - Total number of cache misses
-- `select_cache_evictions` (counter) - Total number of LRU evictions
-- `select_cache_expirations` (counter) - Total number of TTL expirations
-- `select_cache_entries` (gauge) - Current number of entries in cache
-- `select_cache_memory_bytes` (gauge) - Current memory usage in bytes
-
-**Query Metrics**:
-
-```bash
-# Get all cache metrics
-curl http://rs3gw:9000/metrics | grep select_cache
-
-# Calculate hit rate
-select_cache_hits / (select_cache_hits + select_cache_misses) * 100
-
-# Check memory utilization
-select_cache_memory_bytes / max_memory_bytes * 100
-```
-
-**Prometheus Queries** (PromQL):
-
-```promql
-# Cache hit rate over 5 minutes
-rate(select_cache_hits[5m]) / (rate(select_cache_hits[5m]) + rate(select_cache_misses[5m]))
-
-# Cache memory usage percentage
-select_cache_memory_bytes / (100 * 1024 * 1024) * 100
-
-# Eviction rate (evictions per second)
-rate(select_cache_evictions[5m])
-
-# Cache efficiency score (hits per query)
-rate(select_cache_hits[5m]) / rate(select_cache_gets[5m])
-```
-
-**Grafana Dashboard**:
-
-Example dashboard panels:
-
-1. **Cache Hit Rate** - Line graph showing hit rate over time
-2. **Memory Usage** - Gauge showing current memory utilization
-3. **Cache Operations** - Stacked area chart (hits, misses, evictions)
-4. **Entry Count** - Single stat showing current cache entries
-
-### 2. Intelligent Data Tiering
-
-rs3gw provides automated data tiering based on access patterns and business rules.
-
-#### Tiering API
-
-**Get tiering policy for a bucket:**
-```bash
-curl http://rs3gw:9000/api/tiering/policies/my-bucket
-
-{
-  "bucket": "my-bucket",
-  "policy": {
-    "enabled": true,
-    "rules": [
-      {
-        "id": "archive-old-data",
-        "filter": {
-          "prefix": "logs/",
-          "min_age_days": 90
-        },
-        "transitions": [
-          {
-            "storage_class": "GLACIER",
-            "days": 90
-          }
-        ]
-      }
-    ]
-  },
-  "status": "success"
-}
-```
-
-**Set tiering policy:**
-```bash
-curl -X PUT http://rs3gw:9000/api/tiering/policies/my-bucket \
-  -H "Content-Type: application/json" \
-  -d '{
-    "enabled": true,
-    "rules": [
-      {
-        "id": "frequent-to-infrequent",
-        "transitions": [
-          {
-            "storage_class": "STANDARD_IA",
-            "days": 30
-          },
-          {
-            "storage_class": "GLACIER",
-            "days": 90
-          }
-        ]
-      }
-    ]
-  }'
-```
-
-**Analyze tiering recommendations:**
-```bash
-curl -X POST http://rs3gw:9000/api/tiering/analyze/my-bucket
-
-{
-  "analysis": {
-    "total_objects": 10000,
-    "potential_savings": 45.2,
-    "recommendations": [
-      {
-        "object_count": 3500,
-        "current_class": "STANDARD",
-        "recommended_class": "STANDARD_IA",
-        "estimated_savings_pct": 50.0
-      }
-    ]
-  },
-  "timestamp": "2026-01-02T12:34:56.789Z"
-}
-```
-
-**Get tiering history:**
-```bash
-curl http://rs3gw:9000/api/tiering/history/my-bucket
-
-{
-  "bucket": "my-bucket",
-  "transitions": [
-    {
-      "key": "logs/2025-01-01.log",
-      "from_class": "STANDARD",
-      "to_class": "GLACIER",
-      "timestamp": "2026-01-02T00:00:00Z",
-      "reason": "age-based-policy"
-    }
-  ],
-  "total_count": 1250
-}
-```
-
-#### Tiering Policies
-
-rs3gw supports several pre-configured tiering policies:
-
-**Balanced Policy** (Default):
-```bash
-curl -X PUT http://rs3gw:9000/api/tiering/policies/my-bucket \
-  -H "Content-Type: application/json" \
-  -d '{"preset": "balanced"}'
-
-# Transitions:
-# - 30 days → STANDARD_IA
-# - 90 days → INTELLIGENT_TIERING
-# - 180 days → GLACIER
-```
-
-**Aggressive Archival:**
-```bash
-curl -X PUT http://rs3gw:9000/api/tiering/policies/my-bucket \
-  -H "Content-Type: application/json" \
-  -d '{"preset": "aggressive"}'
-
-# Transitions:
-# - 7 days → STANDARD_IA
-# - 30 days → GLACIER
-# - 365 days → DEEP_ARCHIVE
-```
-
-**Cost-Optimized:**
-```bash
-curl -X PUT http://rs3gw:9000/api/tiering/policies/my-bucket \
-  -H "Content-Type: application/json" \
-  -d '{"preset": "cost-optimized"}'
-
-# Transitions:
-# - 14 days → INTELLIGENT_TIERING
-# - 60 days → GLACIER
-```
-
-#### Predictive Tiering
-
-rs3gw uses ML-based access pattern analysis for predictive tiering:
-
-```bash
-curl -X POST http://rs3gw:9000/api/tiering/analyze/my-bucket/predictive
-
-{
-  "analysis": {
-    "access_patterns": {
-      "periodic": 450,
-      "bursty": 230,
-      "trending": 120,
-      "declining": 3200
-    },
-    "recommendations": [
-      {
-        "pattern": "declining",
-        "object_count": 3200,
-        "suggested_action": "transition_to_ia",
-        "confidence": 0.92
-      }
-    ]
-  },
-  "timestamp": "2026-01-02T12:34:56.789Z"
-}
-```
-
-#### Benefits
-
-- **Cost Savings**: Automatically move infrequently accessed data to cheaper storage tiers
-- **Performance**: Keep hot data in fast storage classes
-- **Compliance**: Meet data retention requirements automatically
-- **Predictive**: ML-based access pattern analysis
-
-#### Monitoring
-
-```bash
-# Check tiering statistics
-curl http://rs3gw:9000/api/tiering/stats/my-bucket
-
-# View capacity recommendations
-curl http://rs3gw:9000/api/tiering/recommendations/my-bucket/capacity
-
-# Monitor via Prometheus
-curl http://rs3gw:9000/metrics | grep tiering_
-```
-
----
-
-## Conclusion
-
-This guide covers the essential aspects of deploying rs3gw in production. For additional details, see:
-
-- [Performance Tuning Guide](performance_tuning.md)
-- [rs3ctl CLI Reference](rs3ctl.md)
-- [WebSocket Event Streaming](websocket.md)
-- [Transformations Guide](transformations.md)
-- [Arrow Flight Examples](../examples/ARROW_FLIGHT_README.md)
-- [Preprocessing Pipelines](../examples/PREPROCESSING_PIPELINES.md)
-- [API Documentation](../src/api/README.md)
-- [Storage Documentation](../src/storage/README.md)
-
-Remember to regularly review logs, metrics, and alerts to ensure optimal operation and preemptively address potential issues.
+For container orchestrators (Kubernetes, Docker Compose), ensure `terminationGracePeriodSeconds` is at least 35 seconds to account for the drain timeout plus a small buffer.

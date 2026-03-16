@@ -4,19 +4,81 @@
 //! per-chunk signatures. This allows verifying large uploads without
 //! buffering the entire body in memory.
 //!
-//! ## Format
+//! # Three-phase chunked signing flow
 //!
-//! Each chunk has the format:
+//! Chunked uploads proceed in three distinct phases:
+//!
+//! 1. **Seed signature** — computed from the regular SigV4 request signature
+//!    (covering the request headers). The seed signature acts as the "previous
+//!    signature" for the very first chunk and is carried in the initial HTTP
+//!    request Authorization header.
+//!
+//! 2. **Per-chunk signature** — each chunk is signed independently using the
+//!    string-to-sign:
+//!    ```text
+//!    "AWS4-HMAC-SHA256-PAYLOAD\n"
+//!    + timestamp + "\n"
+//!    + credential_scope + "\n"
+//!    + previous_chunk_signature + "\n"
+//!    + SHA256("") (empty-string hash) + "\n"
+//!    + SHA256(chunk_data)
+//!    ```
+//!    The resulting signature is appended as `chunk-signature=<hex>` in each
+//!    chunk header.  This creates a hash chain: every chunk signature commits
+//!    to the previous one, preventing reordering or truncation attacks.
+//!
+//! 3. **Trailing empty chunk** — the stream is terminated with a zero-length
+//!    chunk (`0;chunk-signature=<sig>\r\n\r\n`).  Its signature covers an
+//!    empty payload and the preceding chunk's signature, closing the chain.
+//!
+//! # Wire format
+//!
+//! Each data chunk:
 //! ```text
-//! hex_size;chunk-signature=signature\r\n
-//! data\r\n
+//! hex_size;chunk-signature=<signature>\r\n
+//! <data bytes>\r\n
 //! ```
 //!
-//! The final chunk is:
+//! Final (empty) chunk:
 //! ```text
-//! 0;chunk-signature=signature\r\n
+//! 0;chunk-signature=<signature>\r\n
 //! \r\n
 //! ```
+//!
+//! # Sentinel header
+//!
+//! A request that uses chunked signing must include:
+//! ```text
+//! x-amz-content-sha256: STREAMING-AWS4-HMAC-SHA256-PAYLOAD
+//! ```
+//! This sentinel tells the server that payload integrity is enforced
+//! per-chunk rather than over the full body.  A simpler alternative that
+//! skips per-chunk signing altogether is:
+//! ```text
+//! x-amz-content-sha256: UNSIGNED-PAYLOAD
+//! ```
+//! In that case the server does not verify chunk signatures.
+//!
+//! # Signed headers
+//!
+//! The seed signature (and therefore all subsequent chunk signatures, via the
+//! hash chain) commits to a subset of request headers.  Headers are selected
+//! and formatted according to the standard SigV4 rules:
+//!
+//! * Only headers listed in `SignedHeaders` (the `X-Amz-SignedHeaders` query
+//!   param for presigned requests, or the `SignedHeaders` component of the
+//!   `Authorization` header for header-auth requests) are included.
+//! * Header names are **lowercased** before inclusion.
+//! * Multiple values for the same header are joined with a comma and a space.
+//! * The list of signed-header names is sorted lexicographically (byte order),
+//!   then concatenated with `;` for the `SignedHeaders` field.
+//! * The canonical headers block appends a trailing newline after every
+//!   `name:value` pair.
+//!
+//! At minimum, `host` must always be signed.  Additional `x-amz-*` headers
+//! (e.g. `x-amz-date`, `x-amz-content-sha256`, `x-amz-decoded-content-length`)
+//! that are present in the request and listed in `SignedHeaders` are also
+//! included in canonical form.
 
 use bytes::{Bytes, BytesMut};
 use hmac::{Hmac, Mac};

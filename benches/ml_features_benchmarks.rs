@@ -52,6 +52,7 @@ fn bench_ml_cache(c: &mut Criterion) {
                     last_modified: Utc::now(),
                     content_type: "application/octet-stream".to_string(),
                     metadata: HashMap::new(),
+                    schema_version: 1,
                 };
                 let _ = cache
                     .put("test-bucket", &key, metadata.clone(), value)

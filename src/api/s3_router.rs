@@ -51,6 +51,12 @@ pub struct ObjectQueryParams {
     pub select_type: Option<String>,
     /// If present, this is a GetObjectTorrent operation
     pub torrent: Option<String>,
+    /// Maximum number of parts to return for ListParts pagination
+    #[serde(rename = "max-parts")]
+    pub max_parts: Option<u32>,
+    /// Part number marker for ListParts pagination (return parts after this number)
+    #[serde(rename = "part-number-marker")]
+    pub part_number_marker: Option<u32>,
 }
 
 /// Query parameters for bucket-level POST operations
@@ -528,6 +534,8 @@ async fn put_object_dispatcher(
                     upload_id: Some(upload_id.clone()),
                     part_number: Some(part_number),
                     uploads: None,
+                    max_parts: None,
+                    part_number_marker: None,
                 }),
                 headers,
             )
@@ -554,6 +562,8 @@ async fn put_object_dispatcher(
                 upload_id: Some(upload_id.clone()),
                 part_number: Some(part_number),
                 uploads: None,
+                max_parts: None,
+                part_number_marker: None,
             }),
             body_bytes,
         )
@@ -568,20 +578,8 @@ async fn put_object_dispatcher(
             .into_response();
     }
 
-    // Collect body to Bytes for PutObject
-    let body_bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read body: {}", e),
-            )
-                .into_response();
-        }
-    };
-
-    // Default to PutObject
-    handlers::put_object(State(state), Path((bucket, key)), headers, body_bytes)
+    // Default to PutObject — pass the raw Body for streaming
+    handlers::put_object(State(state), Path((bucket, key)), headers, body)
         .await
         .into_response()
 }
@@ -647,6 +645,8 @@ async fn post_object_dispatcher(
                 upload_id: Some(upload_id),
                 part_number: None,
                 uploads: None,
+                max_parts: None,
+                part_number_marker: None,
             }),
             body_bytes,
         )
@@ -717,6 +717,8 @@ async fn get_object_dispatcher(
                 upload_id: Some(upload_id),
                 part_number: None,
                 uploads: None,
+                max_parts: query.max_parts,
+                part_number_marker: query.part_number_marker,
             }),
         )
         .await
@@ -752,6 +754,8 @@ async fn delete_object_dispatcher(
                 upload_id: Some(upload_id),
                 part_number: None,
                 uploads: None,
+                max_parts: None,
+                part_number_marker: None,
             }),
         )
         .await
@@ -1024,6 +1028,72 @@ async fn put_bucket_dispatcher(
     }
 
     // Default to CreateBucket
+    // If a non-empty body is provided, it must be a valid CreateBucketConfiguration XML.
+    // Reject clearly malformed XML (non-empty body that lacks an opening XML tag).
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read body: {}", e),
+            )
+                .into_response();
+        }
+    };
+    if !body_bytes.is_empty() {
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        let trimmed = body_str.trim();
+        // A valid XML document must begin with '<'; anything else is malformed
+        if !trimmed.starts_with('<') {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/xml")],
+                r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>MalformedXML</Code><Message>The XML you provided was not well-formed</Message></Error>"#,
+            )
+                .into_response();
+        }
+        // Verify basic XML well-formedness: every opened tag should have a closing counterpart.
+        // We check by scanning for unclosed '<' sequences: if we find a '<' that is not
+        // followed by a matching '>' anywhere in the document, the XML is malformed.
+        let mut depth: i32 = 0;
+        let chars: Vec<char> = trimmed.chars().collect();
+        let mut i = 0;
+        let mut malformed = false;
+        while i < chars.len() {
+            if chars[i] == '<' {
+                if i + 1 >= chars.len() {
+                    malformed = true;
+                    break;
+                }
+                // Find closing '>'
+                if let Some(gt) = chars[i..].iter().position(|&c| c == '>') {
+                    let tag: String = chars[i..i + gt + 1].iter().collect();
+                    if tag.starts_with("</") {
+                        depth -= 1;
+                    } else if !tag.ends_with("/>")
+                        && !tag.starts_with("<?")
+                        && !tag.starts_with("<!")
+                    {
+                        depth += 1;
+                    }
+                    i += gt + 1;
+                } else {
+                    malformed = true;
+                    break;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if malformed || depth != 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/xml")],
+                r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>MalformedXML</Code><Message>The XML you provided was not well-formed</Message></Error>"#,
+            )
+                .into_response();
+        }
+    }
     handlers::create_bucket(State(state), Path(bucket))
         .await
         .into_response()
@@ -1249,8 +1319,12 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         // Health check endpoint
         .route("/health", get(handlers::health_check))
+        // Liveness / readiness probe
+        .route("/ready", get(handlers::ready_check))
         // Prometheus metrics endpoint
         .route("/metrics", get(handlers::metrics))
+        // Admin: garbage-collect abandoned multipart uploads
+        .route("/api/admin/gc/multipart", post(handlers::admin_gc_multipart))
         // Swagger UI endpoint with embedded OpenAPI spec (custom, non-S3 API)
         .merge(utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
             .url("/openapi.json", openapi::ApiDoc::openapi()))
@@ -1330,25 +1404,33 @@ pub fn routes() -> Router<AppState> {
         .route("/api/training/searches/{search_id}/trials", post(training_handlers::add_trial))
         // Presigned URL generation endpoint (custom, non-S3 API)
         .route("/presign/{bucket}/{*key}", get(handlers::generate_presigned_url))
-        // Service-level operations
+        // S3: ListBuckets — returns all buckets owned by the authenticated sender
         .route("/", get(handlers::list_buckets))
-        // Bucket-level operations (with and without trailing slash for SDK compatibility)
+        // S3: HeadBucket — check bucket existence and permissions (with and without trailing slash for SDK compatibility)
         .route("/{bucket}", head(handlers::head_bucket))
         .route("/{bucket}/", head(handlers::head_bucket))
+        // S3: GetBucketLocation / GetBucketVersioning / GetBucketAcl / ListMultipartUploads / ListObjectsV1 / ListObjectsV2
         .route("/{bucket}", get(get_bucket_dispatcher))
         .route("/{bucket}/", get(get_bucket_dispatcher))
+        // S3: CreateBucket / PutBucketVersioning / PutBucketAcl / PutBucketTagging / PutBucketPolicy / PutBucketEncryption / etc.
         .route("/{bucket}", put(put_bucket_dispatcher))
         .route("/{bucket}/", put(put_bucket_dispatcher))
+        // S3: DeleteBucket / DeleteBucketTagging / DeleteBucketPolicy / DeleteBucketEncryption / etc.
         .route("/{bucket}", delete(delete_bucket_dispatcher))
         .route("/{bucket}/", delete(delete_bucket_dispatcher))
+        // S3: DeleteObjects (?delete) / PostObject (multipart/form-data upload)
         .route("/{bucket}", post(post_bucket_dispatcher))
         .route("/{bucket}/", post(post_bucket_dispatcher))
-        // Object-level operations with dispatchers for multipart upload support
+        // S3: HeadObject — returns metadata without the object body
         .route("/{bucket}/{*key}", head(handlers::head_object))
+        // S3: GetObject / GetObjectTagging / GetObjectAcl / GetObjectAttributes / ListParts
         .route("/{bucket}/{*key}", get(get_object_dispatcher))
+        // S3: PutObject / CopyObject (x-amz-copy-source) / UploadPart (partNumber+uploadId) / UploadPartCopy / PutObjectTagging / PutObjectAcl
         .route("/{bucket}/{*key}", put(put_object_dispatcher))
+        // S3: CreateMultipartUpload (?uploads) / CompleteMultipartUpload (?uploadId) / RestoreObject (?restore) / SelectObjectContent (?select)
         .route("/{bucket}/{*key}", post(post_object_dispatcher))
+        // S3: DeleteObject / DeleteObjectTagging (?tagging) / AbortMultipartUpload (?uploadId)
         .route("/{bucket}/{*key}", delete(delete_object_dispatcher))
-        // Lambda Object Lambda endpoint (stub)
+        // S3 Lambda Object Lambda: WriteGetObjectResponse (stub)
         .route("/WriteGetObjectResponse", post(write_get_object_response_handler))
 }

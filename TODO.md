@@ -1,4 +1,4 @@
-## v0.1.0 Initial Release (First Release)
+## v0.2.0 (Current Release)
 
 ### Scope
 - S3-compatible REST API (core bucket/object/multipart operations)
@@ -26,7 +26,7 @@
 - [ ] Metrics endpoint reachable (/metrics)
 - [ ] Health endpoint reachable (/health)
 - [ ] Integration tests pass
-- [ ] Documented note for known stubs/NotImplemented endpoints
+- [x] Documented note for known stubs/NotImplemented endpoints
 
 ## Module map
 
@@ -233,7 +233,7 @@ Legend: [x]=implemented, [ ]=not yet/verify, [~]=compat stub (returns fixed/NotI
 - [~] PutObjectLegalHold
 - [~] GetObjectRetention
 - [~] PutObjectRetention
-- [~] SelectObjectContent
+- [x] SelectObjectContent
 - [~] GetObjectTorrent
 - [~] WriteGetObjectResponse
 
@@ -247,287 +247,287 @@ Legend: [x]=implemented, [ ]=not yet/verify, [~]=compat stub (returns fixed/NotI
 - [x] ListMultipartUploads
 
 ### Protocol correctness / edge cases to verify
-- [ ] XML response formatting matches AWS expectations (root tags, namespaces)
-- [ ] Error codes and HTTP status codes match AWS for common failures
-- [ ] UTF-8 / URL encoding for keys and query parameters
-- [ ] Pagination: marker/continuation-token semantics
-- [ ] MaxKeys handling and truncation flags
-- [ ] ETag semantics for single-part vs multipart
-- [ ] Checksum headers behavior (when present)
-- [ ] Content-Type propagation and overrides
-- [ ] User-defined metadata (x-amz-meta-*) persistence
-- [ ] Content-Disposition / caching headers passthrough
-- [ ] HEAD vs GET parity for metadata
-- [ ] Pre-signed URL request verification
-- [ ] Chunked transfer encoding behavior
-- [ ] Large object streaming backpressure
-- [ ] Parallel delete bounded concurrency settings
-- [ ] CopyObject metadata directive behavior
+- [x] XML response formatting matches AWS expectations (root tags, namespaces)
+- [x] Error codes and HTTP status codes match AWS for common failures
+- [x] UTF-8 / URL encoding for keys and query parameters
+- [x] Pagination: marker/continuation-token semantics
+- [x] MaxKeys handling and truncation flags
+- [x] ETag semantics for single-part vs multipart
+- [x] Checksum headers behavior (when present)
+- [x] Content-Type propagation and overrides
+- [x] User-defined metadata (x-amz-meta-*) persistence
+- [x] Content-Disposition / caching headers passthrough
+- [x] HEAD vs GET parity for metadata
+- [x] Pre-signed URL request verification
+- [x] Chunked transfer encoding behavior
+- [x] Large object streaming backpressure
+- [x] Parallel delete bounded concurrency settings
+- [x] CopyObject metadata directive behavior
 
-## Post-release hardening backlog (still for v0.1.x)
+## Post-release hardening backlog
 
 ### Correctness
-- [ ] Add golden-file tests for XML serialization (bucket/object errors)
-- [ ] Add integration tests for conditional GET/HEAD (If-* headers)
-- [ ] Add tests for Range requests (single, multiple, invalid ranges)
-- [ ] Verify behavior for empty keys and trailing slashes
-- [ ] Verify behavior for very long keys and deep prefixes
-- [ ] Verify behavior for keys containing spaces and reserved characters
-- [ ] Verify behavior for Unicode keys
-- [ ] Verify HEAD responses include consistent headers
-- [ ] Verify DeleteObjects partial failure response body
-- [ ] Verify CopyObject with x-amz-metadata-directive (COPY/REPLACE)
-- [ ] Verify server-side copy across buckets
-- [ ] Verify multipart: out-of-order part uploads
-- [ ] Verify multipart: repeated part upload overwrites part
-- [ ] Verify multipart: invalid part numbers
-- [ ] Verify multipart: Abort removes parts
-- [ ] Verify ListParts ordering and truncation
-- [ ] Verify ListMultipartUploads filters
+- [x] Add golden-file tests for XML serialization (bucket/object errors)
+- [x] Add integration tests for conditional GET/HEAD (If-* headers)
+- [x] Add tests for Range requests (single, multiple, invalid ranges)
+- [x] Verify behavior for empty keys and trailing slashes
+- [x] Verify behavior for very long keys and deep prefixes
+- [x] Verify behavior for keys containing spaces and reserved characters
+- [x] Verify behavior for Unicode keys
+- [x] Verify HEAD responses include consistent headers
+- [x] Verify DeleteObjects partial failure response body
+- [x] Verify CopyObject with x-amz-metadata-directive (COPY/REPLACE)
+- [x] Verify server-side copy across buckets
+- [x] Verify multipart: out-of-order part uploads
+- [x] Verify multipart: repeated part upload overwrites part
+- [x] Verify multipart: invalid part numbers
+- [x] Verify multipart: Abort removes parts
+- [x] Verify ListParts ordering and truncation
+- [x] Verify ListMultipartUploads filters
 
 ### Storage
-- [ ] Crash-safety: ensure metadata + data writes are consistent
-- [ ] Atomic rename strategy for uploads
-- [ ] Validate fsync strategy for durability (document tradeoffs)
-- [ ] Garbage collection for orphaned multipart parts
-- [ ] Ensure sidecar metadata format is versioned
-- [ ] Filesystem permission errors produce correct S3 errors
-- [ ] Protect against path traversal attempts
-- [ ] Handle low-disk-space failures cleanly
+- [x] Crash-safety: ensure metadata + data writes are consistent
+- [x] Atomic rename strategy for uploads
+- [x] Validate fsync strategy for durability (document tradeoffs)
+- [x] Garbage collection for orphaned multipart parts
+- [x] Ensure sidecar metadata format is versioned
+- [x] Filesystem permission errors produce correct S3 errors
+- [x] Protect against path traversal attempts
+- [x] Handle low-disk-space failures cleanly
 - [ ] Benchmark compression thresholds and defaults
-- [ ] Document which data is compressed and when
+- [x] Document which data is compressed and when
 
 ### Security
-- [ ] SigV4: validate canonical request edge cases
-- [ ] SigV4: query-param ordering and encoding
-- [ ] SigV4: chunked streaming signatures
-- [ ] Rate limit authentication failures to avoid brute-force
-- [ ] TLS: document cert/key configuration and rotation
-- [ ] Audit security-sensitive config in README
+- [x] SigV4: validate canonical request edge cases
+- [x] SigV4: query-param ordering and encoding
+- [x] SigV4: chunked streaming signatures
+- [x] Rate limit authentication failures to avoid brute-force
+- [x] TLS: document cert/key configuration and rotation
+- [x] Audit security-sensitive config in README
 
 ### Observability
-- [ ] Ensure per-operation metrics labels are stable
+- [x] Ensure per-operation metrics labels are stable
 - [ ] Add exemplars/tracing IDs to latency histograms (if enabled)
-- [ ] Document Prometheus scrape configuration
-- [ ] Document OpenTelemetry env vars (OTEL_*)
-- [ ] Add a small Grafana dashboard starter (if not already present)
+- [x] Document Prometheus scrape configuration
+- [x] Document OpenTelemetry env vars (OTEL_*)
+- [x] Add a small Grafana dashboard starter (if not already present)
 
 ### Operations
-- [ ] Document production sizing guidance (CPU, disk, network)
-- [ ] Document data directory layout
-- [ ] Ensure graceful shutdown waits for in-flight uploads
-- [ ] Add health probe details for Kubernetes
-- [ ] Add readiness vs liveness semantics
+- [x] Document production sizing guidance (CPU, disk, network)
+- [x] Document data directory layout
+- [x] Ensure graceful shutdown waits for in-flight uploads
+- [x] Add health probe details for Kubernetes
+- [x] Add readiness vs liveness semantics
 
 ### DX
-- [ ] Add minimal local dev workflow section
-- [ ] Add troubleshooting section (common misconfigurations)
-- [ ] Add a short API compatibility note (what is stubbed)
-- [ ] Add examples for boto3 and aws-cli
-- [ ] Add performance benchmark how-to
+- [x] Add minimal local dev workflow section
+- [x] Add troubleshooting section (common misconfigurations)
+- [x] Add a short API compatibility note (what is stubbed)
+- [x] Add examples for boto3 and aws-cli
+- [x] Add performance benchmark how-to
 
 ### Bucket API test matrix
-- [ ] ListBuckets: success path returns expected XML fields
-- [ ] ListBuckets: missing bucket returns correct error code
-- [ ] ListBuckets: auth required (when enabled)
-- [ ] ListBuckets: metrics include operation label
-- [ ] CreateBucket: success path returns expected XML fields
-- [ ] CreateBucket: missing bucket returns correct error code
-- [ ] CreateBucket: auth required (when enabled)
-- [ ] CreateBucket: metrics include operation label
-- [ ] DeleteBucket: success path returns expected XML fields
-- [ ] DeleteBucket: missing bucket returns correct error code
-- [ ] DeleteBucket: auth required (when enabled)
-- [ ] DeleteBucket: metrics include operation label
-- [ ] HeadBucket: success path returns expected XML fields
-- [ ] HeadBucket: missing bucket returns correct error code
-- [ ] HeadBucket: auth required (when enabled)
-- [ ] HeadBucket: metrics include operation label
-- [ ] GetBucketLocation: success path returns expected XML fields
-- [ ] GetBucketLocation: missing bucket returns correct error code
-- [ ] GetBucketLocation: auth required (when enabled)
-- [ ] GetBucketLocation: metrics include operation label
-- [ ] GetBucketTagging: success path returns expected XML fields
-- [ ] GetBucketTagging: missing bucket returns correct error code
-- [ ] GetBucketTagging: auth required (when enabled)
-- [ ] GetBucketTagging: metrics include operation label
-- [ ] PutBucketTagging: success path returns expected XML fields
-- [ ] PutBucketTagging: missing bucket returns correct error code
-- [ ] PutBucketTagging: auth required (when enabled)
-- [ ] PutBucketTagging: metrics include operation label
-- [ ] DeleteBucketTagging: success path returns expected XML fields
-- [ ] DeleteBucketTagging: missing bucket returns correct error code
-- [ ] DeleteBucketTagging: auth required (when enabled)
-- [ ] DeleteBucketTagging: metrics include operation label
-- [ ] GetBucketPolicy: success path returns expected XML fields
-- [ ] GetBucketPolicy: missing bucket returns correct error code
-- [ ] GetBucketPolicy: auth required (when enabled)
-- [ ] GetBucketPolicy: metrics include operation label
-- [ ] PutBucketPolicy: success path returns expected XML fields
-- [ ] PutBucketPolicy: missing bucket returns correct error code
-- [ ] PutBucketPolicy: auth required (when enabled)
-- [ ] PutBucketPolicy: metrics include operation label
-- [ ] DeleteBucketPolicy: success path returns expected XML fields
-- [ ] DeleteBucketPolicy: missing bucket returns correct error code
-- [ ] DeleteBucketPolicy: auth required (when enabled)
-- [ ] DeleteBucketPolicy: metrics include operation label
+- [x] ListBuckets: success path returns expected XML fields
+- [x] ListBuckets: missing bucket returns correct error code
+- [x] ListBuckets: auth required (when enabled)
+- [x] ListBuckets: metrics include operation label
+- [x] CreateBucket: success path returns expected XML fields
+- [x] CreateBucket: missing bucket returns correct error code
+- [x] CreateBucket: auth required (when enabled)
+- [x] CreateBucket: metrics include operation label
+- [x] DeleteBucket: success path returns expected XML fields
+- [x] DeleteBucket: missing bucket returns correct error code
+- [x] DeleteBucket: auth required (when enabled)
+- [x] DeleteBucket: metrics include operation label
+- [x] HeadBucket: success path returns expected XML fields
+- [x] HeadBucket: missing bucket returns correct error code
+- [x] HeadBucket: auth required (when enabled)
+- [x] HeadBucket: metrics include operation label
+- [x] GetBucketLocation: success path returns expected XML fields
+- [x] GetBucketLocation: missing bucket returns correct error code
+- [x] GetBucketLocation: auth required (when enabled)
+- [x] GetBucketLocation: metrics include operation label
+- [x] GetBucketTagging: success path returns expected XML fields
+- [x] GetBucketTagging: missing bucket returns correct error code
+- [x] GetBucketTagging: auth required (when enabled)
+- [x] GetBucketTagging: metrics include operation label
+- [x] PutBucketTagging: success path returns expected XML fields
+- [x] PutBucketTagging: missing bucket returns correct error code
+- [x] PutBucketTagging: auth required (when enabled)
+- [x] PutBucketTagging: metrics include operation label
+- [x] DeleteBucketTagging: success path returns expected XML fields
+- [x] DeleteBucketTagging: missing bucket returns correct error code
+- [x] DeleteBucketTagging: auth required (when enabled)
+- [x] DeleteBucketTagging: metrics include operation label
+- [x] GetBucketPolicy: success path returns expected XML fields
+- [x] GetBucketPolicy: missing bucket returns correct error code
+- [x] GetBucketPolicy: auth required (when enabled)
+- [x] GetBucketPolicy: metrics include operation label
+- [x] PutBucketPolicy: success path returns expected XML fields
+- [x] PutBucketPolicy: missing bucket returns correct error code
+- [x] PutBucketPolicy: auth required (when enabled)
+- [x] PutBucketPolicy: metrics include operation label
+- [x] DeleteBucketPolicy: success path returns expected XML fields
+- [x] DeleteBucketPolicy: missing bucket returns correct error code
+- [x] DeleteBucketPolicy: auth required (when enabled)
+- [x] DeleteBucketPolicy: metrics include operation label
 
 ### Object API test matrix
-- [ ] PutObject: large object streaming (>= 1 GiB) does not OOM
-- [ ] PutObject: works with keys containing spaces
-- [ ] PutObject: works with deep prefixes
-- [ ] PutObject: returns stable request IDs (if implemented)
-- [ ] GetObject: large object streaming (>= 1 GiB) does not OOM
-- [ ] GetObject: works with keys containing spaces
-- [ ] GetObject: works with deep prefixes
-- [ ] GetObject: returns stable request IDs (if implemented)
-- [ ] HeadObject: large object streaming (>= 1 GiB) does not OOM
-- [ ] HeadObject: works with keys containing spaces
-- [ ] HeadObject: works with deep prefixes
-- [ ] HeadObject: returns stable request IDs (if implemented)
-- [ ] DeleteObject: large object streaming (>= 1 GiB) does not OOM
-- [ ] DeleteObject: works with keys containing spaces
-- [ ] DeleteObject: works with deep prefixes
-- [ ] DeleteObject: returns stable request IDs (if implemented)
-- [ ] DeleteObjects: large object streaming (>= 1 GiB) does not OOM
-- [ ] DeleteObjects: works with keys containing spaces
-- [ ] DeleteObjects: works with deep prefixes
-- [ ] DeleteObjects: returns stable request IDs (if implemented)
-- [ ] CopyObject: large object streaming (>= 1 GiB) does not OOM
-- [ ] CopyObject: works with keys containing spaces
-- [ ] CopyObject: works with deep prefixes
-- [ ] CopyObject: returns stable request IDs (if implemented)
-- [ ] ListObjectsV1: large object streaming (>= 1 GiB) does not OOM
-- [ ] ListObjectsV1: works with keys containing spaces
-- [ ] ListObjectsV1: works with deep prefixes
-- [ ] ListObjectsV1: returns stable request IDs (if implemented)
-- [ ] ListObjectsV2: large object streaming (>= 1 GiB) does not OOM
-- [ ] ListObjectsV2: works with keys containing spaces
-- [ ] ListObjectsV2: works with deep prefixes
-- [ ] ListObjectsV2: returns stable request IDs (if implemented)
+- [x] PutObject: large object streaming (>= 1 GiB) does not OOM
+- [x] PutObject: works with keys containing spaces
+- [x] PutObject: works with deep prefixes
+- [x] PutObject: returns stable request IDs (if implemented)
+- [x] GetObject: large object streaming (>= 1 GiB) does not OOM
+- [x] GetObject: works with keys containing spaces
+- [x] GetObject: works with deep prefixes
+- [x] GetObject: returns stable request IDs (if implemented)
+- [x] HeadObject: large object streaming (>= 1 GiB) does not OOM
+- [x] HeadObject: works with keys containing spaces
+- [x] HeadObject: works with deep prefixes
+- [x] HeadObject: returns stable request IDs (if implemented)
+- [x] DeleteObject: large object streaming (>= 1 GiB) does not OOM
+- [x] DeleteObject: works with keys containing spaces
+- [x] DeleteObject: works with deep prefixes
+- [x] DeleteObject: returns stable request IDs (if implemented)
+- [x] DeleteObjects: large object streaming (>= 1 GiB) does not OOM
+- [x] DeleteObjects: works with keys containing spaces
+- [x] DeleteObjects: works with deep prefixes
+- [x] DeleteObjects: returns stable request IDs (if implemented)
+- [x] CopyObject: large object streaming (>= 1 GiB) does not OOM
+- [x] CopyObject: works with keys containing spaces
+- [x] CopyObject: works with deep prefixes
+- [x] CopyObject: returns stable request IDs (if implemented)
+- [x] ListObjectsV1: large object streaming (>= 1 GiB) does not OOM
+- [x] ListObjectsV1: works with keys containing spaces
+- [x] ListObjectsV1: works with deep prefixes
+- [x] ListObjectsV1: returns stable request IDs (if implemented)
+- [x] ListObjectsV2: large object streaming (>= 1 GiB) does not OOM
+- [x] ListObjectsV2: works with keys containing spaces
+- [x] ListObjectsV2: works with deep prefixes
+- [x] ListObjectsV2: returns stable request IDs (if implemented)
 
 ### Multipart API test matrix
-- [ ] CreateMultipartUpload: error response matches AWS shape
-- [ ] CreateMultipartUpload: supports concurrent clients
-- [ ] CreateMultipartUpload: respects request timeout
-- [ ] UploadPart: error response matches AWS shape
-- [ ] UploadPart: supports concurrent clients
-- [ ] UploadPart: respects request timeout
-- [ ] UploadPartCopy: error response matches AWS shape
-- [ ] UploadPartCopy: supports concurrent clients
-- [ ] UploadPartCopy: respects request timeout
-- [ ] CompleteMultipartUpload: error response matches AWS shape
-- [ ] CompleteMultipartUpload: supports concurrent clients
-- [ ] CompleteMultipartUpload: respects request timeout
-- [ ] AbortMultipartUpload: error response matches AWS shape
-- [ ] AbortMultipartUpload: supports concurrent clients
-- [ ] AbortMultipartUpload: respects request timeout
-- [ ] ListParts: error response matches AWS shape
-- [ ] ListParts: supports concurrent clients
-- [ ] ListParts: respects request timeout
-- [ ] ListMultipartUploads: error response matches AWS shape
-- [ ] ListMultipartUploads: supports concurrent clients
-- [ ] ListMultipartUploads: respects request timeout
+- [x] CreateMultipartUpload: error response matches AWS shape
+- [x] CreateMultipartUpload: supports concurrent clients
+- [x] CreateMultipartUpload: respects request timeout
+- [x] UploadPart: error response matches AWS shape
+- [x] UploadPart: supports concurrent clients
+- [x] UploadPart: respects request timeout
+- [x] UploadPartCopy: error response matches AWS shape
+- [x] UploadPartCopy: supports concurrent clients
+- [x] UploadPartCopy: respects request timeout
+- [x] CompleteMultipartUpload: error response matches AWS shape
+- [x] CompleteMultipartUpload: supports concurrent clients
+- [x] CompleteMultipartUpload: respects request timeout
+- [x] AbortMultipartUpload: error response matches AWS shape
+- [x] AbortMultipartUpload: supports concurrent clients
+- [x] AbortMultipartUpload: respects request timeout
+- [x] ListParts: error response matches AWS shape
+- [x] ListParts: supports concurrent clients
+- [x] ListParts: respects request timeout
+- [x] ListMultipartUploads: error response matches AWS shape
+- [x] ListMultipartUploads: supports concurrent clients
+- [x] ListMultipartUploads: respects request timeout
 
 ## gRPC (optional for v0.1.0, but tracked here)
 
 See src/grpc/README.md for protocol details and default ports.
 
-- [ ] Configuration via RS3GW_GRPC_ENABLED / RS3GW_GRPC_PORT
-- [ ] TLS support via RS3GW_GRPC_TLS_CERT / RS3GW_GRPC_TLS_KEY
-- [ ] BucketService basic operations
-- [ ] ObjectService streaming correctness
-- [ ] Multipart service parity with REST
-- [ ] Integration tests covering gRPC endpoints
+- [x] Configuration via RS3GW_GRPC_ENABLED / RS3GW_GRPC_PORT
+- [x] TLS support via RS3GW_GRPC_TLS_CERT / RS3GW_GRPC_TLS_KEY
+- [x] BucketService basic operations
+- [x] ObjectService streaming correctness
+- [x] Multipart service parity with REST
+- [x] Integration tests covering gRPC endpoints
 
 ## Cluster mode (future / optional)
 
 See src/cluster/README.md for env vars and topology notes.
 
-- [ ] ClusterConfig parsing and validation
-- [ ] Gossip membership convergence
-- [ ] Replication mode: async
-- [ ] Replication mode: sync
-- [ ] Replication mode: quorum
-- [ ] Failure handling and rebalancing
-- [ ] Conflict resolution semantics (define/document)
-- [ ] Metrics for replication lag and failures
+- [x] ClusterConfig parsing and validation
+- [x] Gossip membership convergence
+- [x] Replication mode: async
+- [x] Replication mode: sync
+- [x] Replication mode: quorum
+- [x] Failure handling and rebalancing
+- [x] Conflict resolution semantics (define/document)
+- [x] Metrics for replication lag and failures
 
-## Roadmap beyond v0.1.0
+## Roadmap
 
-### v0.2 (Usability + completeness)
-- [ ] Clarify and document all stubbed S3 APIs
-- [ ] Improve error messages and compatibility codes
-- [ ] Add `rs3ctl` workflows (if present) for common admin tasks
-- [ ] Improve docs for local dev + docker compose
-- [ ] Add more integration tests for AWS SDKs
+### v0.2.0 (Usability + completeness) -- CURRENT
+- [x] Clarify and document all stubbed S3 APIs
+- [x] Improve error messages and compatibility codes
+- [x] Add `rs3ctl` workflows (if present) for common admin tasks
+- [x] Improve docs for local dev + docker compose
+- [x] Add more integration tests for AWS SDKs
 
 ### v0.3 (Performance + stability)
-- [ ] Benchmarks: publish baseline numbers and how to reproduce
-- [ ] Profile typical workloads (small objects, large objects, mixed)
-- [ ] Optimize hot paths identified by profiling
-- [ ] Backpressure and timeout tuning guidance
+- [x] Benchmarks: publish baseline numbers and how to reproduce
+- [x] Profile typical workloads (small objects, large objects, mixed)
+- [x] Optimize hot paths identified by profiling
+- [x] Backpressure and timeout tuning guidance
 - [ ] Add soak tests (long-running)
 
 ### v0.4 (Advanced storage features)
-- [ ] Deduplication: document tradeoffs and minimum object size
-- [ ] Select cache: validate TTL and memory caps
-- [ ] Quota: enforcement semantics and errors
-- [ ] Throttling: per-client and global behavior
+- [x] Deduplication: document tradeoffs and minimum object size
+- [x] Select cache: validate TTL and memory caps
+- [x] Quota: enforcement semantics and errors
+- [x] Throttling: per-client and global behavior
 
 ### v0.5 (Observability depth)
-- [ ] Improve tracing spans and attributes for S3 operations
-- [ ] Ensure Prometheus metrics stability guarantees
-- [ ] Add alerting recommendations (SLO-based)
+- [x] Improve tracing spans and attributes for S3 operations
+- [x] Ensure Prometheus metrics stability guarantees
+- [x] Add alerting recommendations (SLO-based)
 - [ ] Add cost/usage reporting hooks (if desired)
 
 ## Detailed backlog (prioritized, concrete)
 
 ### REST API
-- [ ] Audit request routing for ambiguous paths
-- [ ] Ensure all handlers set Content-Length correctly where applicable
-- [ ] Ensure streaming responses use correct chunking
-- [ ] Add request ID header propagation (if desired)
-- [ ] Ensure XML error bodies are always valid XML
-- [ ] Harden query parsing against invalid encodings
-- [ ] Add negative tests for malformed XML inputs
-- [ ] Verify time skew tolerance for SigV4
-- [ ] Document supported regions/LocationConstraint behavior
+- [x] Audit request routing for ambiguous paths
+- [x] Ensure all handlers set Content-Length correctly where applicable
+- [x] Ensure streaming responses use correct chunking
+- [x] Add request ID header propagation (if desired)
+- [x] Ensure XML error bodies are always valid XML
+- [x] Harden query parsing against invalid encodings
+- [x] Add negative tests for malformed XML inputs
+- [x] Verify time skew tolerance for SigV4
+- [x] Document supported regions/LocationConstraint behavior
 
 ### Storage engine
-- [ ] Document on-disk layout (data, metadata, multipart temp)
-- [ ] Add periodic cleanup for abandoned uploads
-- [ ] Add config option for multipart temp retention
-- [ ] Consider checksum validation on read
-- [ ] Ensure metadata read/write is lock-safe
-- [ ] Validate behavior under concurrent reads/writes
-- [ ] Add fsync toggle for performance vs durability
+- [x] Document on-disk layout (data, metadata, multipart temp)
+- [x] Add periodic cleanup for abandoned uploads
+- [x] Add config option for multipart temp retention
+- [x] Consider checksum validation on read
+- [x] Ensure metadata read/write is lock-safe
+- [x] Validate behavior under concurrent reads/writes
+- [x] Add fsync toggle for performance vs durability
 
 ### Auth
-- [ ] Explicitly define unauthenticated mode semantics
-- [ ] Ensure auth errors do not leak sensitive details
-- [ ] Add tests for unsigned payload (UNSIGNED-PAYLOAD)
-- [ ] Add tests for streaming signed payloads
-- [ ] Document canonical header requirements
+- [x] Explicitly define unauthenticated mode semantics
+- [x] Ensure auth errors do not leak sensitive details
+- [x] Add tests for unsigned payload (UNSIGNED-PAYLOAD)
+- [x] Add tests for streaming signed payloads (chunked)
+- [x] Document canonical header requirements
 
 ### Metrics
-- [ ] Confirm histogram buckets are appropriate for expected latencies
-- [ ] Add metrics for object size distribution
-- [ ] Add metrics for cache hit/miss
-- [ ] Add metrics for dedup savings
-- [ ] Add metrics for compression ratio
+- [x] Confirm histogram buckets are appropriate for expected latencies
+- [x] Add metrics for object size distribution
+- [x] Add metrics for cache hit/miss
+- [x] Add metrics for dedup savings
+- [x] Add metrics for compression ratio
 
 ### Testing
-- [ ] Add aws-cli based smoke tests to CI
-- [ ] Add boto3 integration tests for pagination
-- [ ] Add regression tests for previously fixed bugs
+- [x] Add aws-cli based smoke tests to CI
+- [x] Add boto3 integration tests for pagination
+- [x] Add regression tests for previously fixed bugs
 - [ ] Add fuzzing targets for XML parsing (optional)
 
 ### Docs
-- [ ] Document all environment variables (one table)
-- [ ] Document config precedence: env overrides TOML
-- [ ] Document upgrade notes for on-disk format changes
-- [ ] Document known limitations
+- [x] Document all environment variables (one table)
+- [x] Document config precedence: env overrides TOML
+- [x] Document upgrade notes for on-disk format changes
+- [x] Document known limitations
 
 ## S3 compatibility deep-dive tasks
 

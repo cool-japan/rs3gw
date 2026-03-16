@@ -1,11 +1,59 @@
-//! Auto-generated module
+//! Storage engine core types and implementation.
 //!
-//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
+//! # On-disk layout
+//!
+//! ```text
+//! <root>/
+//!   <bucket>/
+//!     objects/<encoded_key>              # object data (may be zstd/lz4 compressed)
+//!     metadata/<encoded_key>.json        # JSON: ObjectMetadata (schema_version=1)
+//!     sci_metadata/<encoded_key>.json    # JSON: SciMetadata (HPC/AI fields)
+//!     tags/<encoded_key>.json            # JSON: ObjectTagging
+//!     bucket_tags.json                   # JSON: bucket-level tags
+//!     bucket_policy.json                 # JSON: bucket access policy
+//!     multipart/<upload_id>/
+//!       metadata.json                    # JSON: MultipartMetadata
+//!       part-00001, part-00002, ...      # raw part data files
+//! ```
+//!
+//! ## Key encoding
+//!
+//! S3 keys that end with `/` (directory-placeholder objects) cannot be stored as
+//! a file with a trailing slash on most filesystems.  The final empty component is
+//! replaced with the sentinel string `__DIROBJ__` so such keys round-trip cleanly.
+//!
+//! ## Atomic-rename durability
+//!
+//! Both object data (`put_object`) and metadata (`save_metadata`) are written to a
+//! temporary file (`<final_path>.tmp.<nanos>`) and then `rename`d into place.
+//! This guarantees that readers never observe a partial write.
+//!
+//! ## fsync flag
+//!
+//! When `fsync_enabled` is `true`, `file.sync_all()` is called on the temp file
+//! before the rename.  This trades throughput for extra crash durability and is
+//! disabled by default (it can be enabled via the `RS3GW_FSYNC=true` environment
+//! variable or the `--fsync` CLI flag).
+//!
+//! ## schema_version
+//!
+//! Every `metadata/<key>.json` file contains `"schema_version": 1`.  Future
+//! breaking changes to the metadata schema must increment this value so that older
+//! binaries can detect and refuse to load incompatible data.
+//!
+//! ## Checksum validation
+//!
+//! When `checksum_validation` is enabled (via `RS3GW_CHECKSUM_VALIDATION=true`),
+//! `get_object` reads the full object body and verifies the stored SHA-256 digest
+//! (base64-encoded in `__checksum_value__` metadata) before streaming the data to
+//! the caller.  A mismatch returns `StorageError::Internal` with a descriptive
+//! message.
 
 pub use crate::storage::versioning::{
     BucketVersionIndex, BucketVersioningConfig, ObjectVersionIndex, ObjectVersionMetadata,
     VersioningManager, VersioningStatus,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::stream::{Stream, StreamExt};
@@ -97,6 +145,10 @@ struct CacheEntry {
     metadata: ObjectMetadata,
     cached_at: DateTime<Utc>,
 }
+fn default_schema_version() -> u32 {
+    1
+}
+
 /// Object metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectMetadata {
@@ -106,11 +158,19 @@ pub struct ObjectMetadata {
     pub last_modified: DateTime<Utc>,
     pub content_type: String,
     pub metadata: HashMap<String, String>,
+    /// Schema version for forward-compatibility. Always 1 for current format.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
 }
 pub struct StorageEngine {
     root: PathBuf,
     compression: CompressionMode,
     versioning_manager: Arc<VersioningManager>,
+    /// When true, fsync object file before atomic rename for extra durability.
+    fsync_enabled: bool,
+    /// When true, SHA-256 checksum is verified on every `get_object` call
+    /// for objects that carry `__checksum_algo__` / `__checksum_value__` metadata.
+    checksum_validation: bool,
 }
 impl StorageEngine {
     /// Create a new storage engine at the given root path
@@ -121,12 +181,72 @@ impl StorageEngine {
             root,
             compression: CompressionMode::None,
             versioning_manager,
+            fsync_enabled: false,
+            checksum_validation: false,
         })
     }
     /// Set compression mode
     pub fn with_compression(mut self, mode: CompressionMode) -> Self {
         self.compression = mode;
         self
+    }
+    /// Enable or disable fsync before rename (safer but slower)
+    pub fn with_fsync(mut self, enabled: bool) -> Self {
+        self.fsync_enabled = enabled;
+        self
+    }
+
+    /// Enable or disable SHA-256 checksum validation on read.
+    ///
+    /// When enabled, `get_object` verifies the stored checksum (if present in
+    /// `__checksum_algo__` / `__checksum_value__` metadata) before returning
+    /// data.  A mismatch is treated as object corruption and returns
+    /// `StorageError::Internal`.
+    pub fn with_checksum_validation(mut self, enabled: bool) -> Self {
+        self.checksum_validation = enabled;
+        self
+    }
+
+    /// Decompress raw bytes if a compression algorithm is specified.
+    ///
+    /// Returns the original bytes unchanged when `algo` is `None`.
+    fn maybe_decompress(raw: &[u8], algo: Option<&str>) -> Result<Bytes, StorageError> {
+        match algo {
+            Some("zstd") => {
+                let decompressed = zstd::decode_all(raw).map_err(|e| {
+                    StorageError::Internal(format!("zstd decompression failed: {e}"))
+                })?;
+                Ok(Bytes::from(decompressed))
+            }
+            Some("lz4") => {
+                let decompressed = lz4_flex::decompress_size_prepended(raw).map_err(|e| {
+                    StorageError::Internal(format!("lz4 decompression failed: {e}"))
+                })?;
+                Ok(Bytes::from(decompressed))
+            }
+            _ => Ok(Bytes::copy_from_slice(raw)),
+        }
+    }
+
+    /// Validate an object key for safety.
+    ///
+    /// Rejects:
+    /// - Keys containing null bytes
+    /// - Any path component that is exactly `..` (path traversal)
+    fn validate_key(key: &str) -> Result<(), StorageError> {
+        if key.contains('\0') {
+            return Err(StorageError::InvalidKey(
+                "key contains null byte".to_string(),
+            ));
+        }
+        for component in key.split('/') {
+            if component == ".." {
+                return Err(StorageError::InvalidKey(
+                    "path traversal not allowed".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
     /// Get the storage root path
     pub fn get_root_path(&self) -> PathBuf {
@@ -135,23 +255,50 @@ impl StorageEngine {
     fn bucket_path(&self, bucket: &str) -> PathBuf {
         self.root.join(bucket)
     }
+
+    /// Encode an S3 object key into a filesystem-safe path component.
+    ///
+    /// S3 keys may end with `/` (used as directory-placeholder objects). On most
+    /// filesystems a trailing slash in a path means "this is a directory", which
+    /// makes it impossible to create a *file* at that path. To resolve the
+    /// ambiguity we rewrite the final empty component (the one produced by the
+    /// trailing slash) to the sentinel filename `__DIROBJ__`.
+    ///
+    /// Examples:
+    ///   `"folder/"` → `"folder/__DIROBJ__"`
+    ///   `"a/b/c/"` → `"a/b/c/__DIROBJ__"`
+    ///   `"plain-key"` → `"plain-key"` (unchanged)
+    fn sanitize_key_for_fs(key: &str) -> String {
+        // Strip any leading slashes to prevent absolute-path injection when
+        // the sanitised key is joined onto a PathBuf.  S3 treats "/foo" and
+        // "foo" as the same key for filesystem storage purposes.
+        let key = key.trim_start_matches('/');
+        if key.ends_with('/') {
+            format!("{}__DIROBJ__", key)
+        } else {
+            key.to_string()
+        }
+    }
+
     fn object_path(&self, bucket: &str, key: &str) -> PathBuf {
-        self.bucket_path(bucket).join("objects").join(key)
+        self.bucket_path(bucket)
+            .join("objects")
+            .join(Self::sanitize_key_for_fs(key))
     }
     fn metadata_path(&self, bucket: &str, key: &str) -> PathBuf {
         self.bucket_path(bucket)
             .join("metadata")
-            .join(format!("{}.json", key))
+            .join(format!("{}.json", Self::sanitize_key_for_fs(key)))
     }
     fn sci_metadata_path(&self, bucket: &str, key: &str) -> PathBuf {
         self.bucket_path(bucket)
             .join("sci_metadata")
-            .join(format!("{}.json", key))
+            .join(format!("{}.json", Self::sanitize_key_for_fs(key)))
     }
     fn tagging_path(&self, bucket: &str, key: &str) -> PathBuf {
         self.bucket_path(bucket)
             .join("tags")
-            .join(format!("{}.json", key))
+            .join(format!("{}.json", Self::sanitize_key_for_fs(key)))
     }
     fn bucket_tagging_path(&self, bucket: &str) -> PathBuf {
         self.bucket_path(bucket).join("bucket_tags.json")
@@ -268,9 +415,15 @@ impl StorageEngine {
         max_keys: usize,
         start_after: Option<&str>,
     ) -> Result<(Vec<ObjectMetadata>, Vec<String>, bool), StorageError> {
+        // Load ALL objects in the bucket/prefix so that start_after filtering
+        // works correctly regardless of filesystem enumeration order.
         let (mut objects, common_prefixes) = self
-            .list_objects(bucket, prefix, delimiter, max_keys + 1)
+            .list_objects(bucket, prefix, delimiter, usize::MAX)
             .await?;
+
+        // Sort by key so lexicographic ordering and pagination are deterministic.
+        objects.sort_by(|a, b| a.key.cmp(&b.key));
+
         if let Some(marker) = start_after {
             objects.retain(|obj| obj.key.as_str() > marker);
         }
@@ -332,10 +485,18 @@ impl StorageEngine {
                     )
                     .await?;
                 } else {
-                    if !key.starts_with(prefix) {
+                    // Reverse the filesystem key encoding: `folder/__DIROBJ__`
+                    // was stored as a directory-placeholder object with logical
+                    // key `folder/`.
+                    let logical_key = if key.ends_with("/__DIROBJ__") {
+                        key[..key.len() - "__DIROBJ__".len()].to_string()
+                    } else {
+                        key.clone()
+                    };
+                    if !logical_key.starts_with(prefix) {
                         continue;
                     }
-                    if let Ok(metadata) = self.load_metadata(bucket, &key).await {
+                    if let Ok(metadata) = self.load_metadata(bucket, &logical_key).await {
                         objects.push(metadata);
                     }
                 }
@@ -355,6 +516,12 @@ impl StorageEngine {
         self.load_metadata(bucket, key).await
     }
     /// Get an object
+    ///
+    /// When `checksum_validation` is enabled and the object metadata contains
+    /// `__checksum_algo__ = "sha256"` together with `__checksum_value__` (a
+    /// base64-encoded SHA-256 digest), the full object is read, the digest is
+    /// computed and compared.  A mismatch returns
+    /// `StorageError::Internal("checksum mismatch: object data corrupted")`.
     pub async fn get_object(
         &self,
         bucket: &str,
@@ -368,6 +535,43 @@ impl StorageEngine {
     > {
         let metadata = self.head_object(bucket, key).await?;
         let path = self.object_path(bucket, key);
+
+        // Determine if the stored data is compressed.
+        let compression_algo = metadata.metadata.get("__compression__").cloned();
+
+        if self.checksum_validation {
+            if let (Some(algo), Some(stored_value)) = (
+                metadata.metadata.get("__checksum_algo__"),
+                metadata.metadata.get("__checksum_value__"),
+            ) {
+                if algo == "sha256" {
+                    let raw = fs::read(&path).await?;
+                    let digest = sha2::Sha256::digest(&raw);
+                    let computed = BASE64_STANDARD.encode(digest);
+                    if computed != *stored_value {
+                        return Err(StorageError::Internal(
+                            "checksum mismatch: object data corrupted".to_string(),
+                        ));
+                    }
+                    // Checksum verified — decompress if needed, then stream.
+                    let decompressed = Self::maybe_decompress(&raw, compression_algo.as_deref())?;
+                    let stream = futures::stream::iter(std::iter::once(Ok::<Bytes, StorageError>(
+                        decompressed,
+                    )));
+                    return Ok((metadata, Box::new(stream)));
+                }
+            }
+        }
+
+        // If data is compressed, read into memory and decompress.
+        if compression_algo.is_some() {
+            let raw = fs::read(&path).await?;
+            let decompressed = Self::maybe_decompress(&raw, compression_algo.as_deref())?;
+            let stream =
+                futures::stream::iter(std::iter::once(Ok::<Bytes, StorageError>(decompressed)));
+            return Ok((metadata, Box::new(stream)));
+        }
+
         let file = File::open(&path).await?;
         let stream = tokio_util::io::ReaderStream::new(file);
         let stream = stream.map(|result| result.map_err(StorageError::from));
@@ -399,6 +603,12 @@ impl StorageEngine {
         Ok((metadata, Box::new(stream)))
     }
     /// Put an object
+    ///
+    /// Implements storage hardening:
+    /// - Path traversal protection via `validate_key`
+    /// - Atomic write via temp file + rename
+    /// - Optional fsync before rename (controlled by `fsync_enabled`)
+    /// - ENOSPC → `StorageError::InsufficientStorage`
     pub async fn put_object(
         &self,
         bucket: &str,
@@ -407,6 +617,9 @@ impl StorageEngine {
         metadata: HashMap<String, String>,
         data: Bytes,
     ) -> Result<String, StorageError> {
+        // Validate key before any filesystem operations.
+        Self::validate_key(key)?;
+
         if !self.bucket_exists(bucket).await? {
             return Err(StorageError::BucketNotFound);
         }
@@ -414,27 +627,218 @@ impl StorageEngine {
         if let Some(parent) = object_path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&object_path)
-            .await?;
-        file.write_all(&data).await?;
-        file.sync_all().await?;
+
+        // Compress data if compression is enabled.
+        let original_size = data.len() as u64;
+        let (write_data, metadata) = match self.compression {
+            CompressionMode::Zstd(level) => {
+                let compressed = zstd::encode_all(data.as_ref(), level)
+                    .map_err(|e| StorageError::Internal(format!("zstd compression failed: {e}")))?;
+                let compressed_size = compressed.len() as u64;
+                crate::metrics::record_compression("zstd", original_size, compressed_size);
+                let mut meta = metadata;
+                meta.insert("__compression__".to_string(), "zstd".to_string());
+                meta.insert("__original_size__".to_string(), original_size.to_string());
+                (Bytes::from(compressed), meta)
+            }
+            CompressionMode::Lz4 => {
+                let compressed = lz4_flex::compress_prepend_size(data.as_ref());
+                let compressed_size = compressed.len() as u64;
+                crate::metrics::record_compression("lz4", original_size, compressed_size);
+                let mut meta = metadata;
+                meta.insert("__compression__".to_string(), "lz4".to_string());
+                meta.insert("__original_size__".to_string(), original_size.to_string());
+                (Bytes::from(compressed), meta)
+            }
+            CompressionMode::None => (data.clone(), metadata),
+        };
+
+        // Build a temp path alongside the final destination.
+        let tmp_path = {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            PathBuf::from(format!("{}.tmp.{}", object_path.display(), nanos))
+        };
+
+        // Write to temp file, cleaning up on any error.
+        let write_result: Result<(), StorageError> = async {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .await?;
+
+            file.write_all(&write_data).await.map_err(|e| {
+                if e.kind() == std::io::ErrorKind::StorageFull {
+                    StorageError::InsufficientStorage
+                } else {
+                    StorageError::Io(e)
+                }
+            })?;
+
+            if self.fsync_enabled {
+                file.sync_all().await.map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::StorageFull {
+                        StorageError::InsufficientStorage
+                    } else {
+                        StorageError::Io(e)
+                    }
+                })?;
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = write_result {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(e);
+        }
+
+        // Atomic rename: old content is never partially visible.
+        if let Err(e) = fs::rename(&tmp_path, &object_path).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(StorageError::Io(e));
+        }
+
         let etag = format!("{:x}", sha2::Sha256::digest(&data));
         let obj_metadata = ObjectMetadata {
             key: key.to_string(),
-            size: data.len() as u64,
+            size: original_size,
             etag: etag.clone(),
             last_modified: Utc::now(),
             content_type: content_type.to_string(),
-            metadata,
+            metadata: metadata.clone(),
+            schema_version: 1,
         };
         self.save_metadata(bucket, key, &obj_metadata).await?;
+
+        // When versioning is enabled (or suspended), record this new object version.
+        if let Ok(versioning_cfg) = self.versioning_manager.get_config(bucket).await {
+            match versioning_cfg.status {
+                crate::storage::VersioningStatus::Enabled
+                | crate::storage::VersioningStatus::Suspended => {
+                    let version = crate::storage::versioning::ObjectVersionMetadata::new(
+                        key.to_string(),
+                        obj_metadata.size,
+                        etag.clone(),
+                    );
+                    if let Err(e) = self
+                        .versioning_manager
+                        .add_version(bucket, key.to_string(), version)
+                        .await
+                    {
+                        error!("Failed to record version for {}/{}: {}", bucket, key, e);
+                    }
+                }
+                crate::storage::VersioningStatus::Unversioned => {}
+            }
+        }
+
+        crate::metrics::record_object_size(bucket, data.len() as u64);
         info!("Put object: {}/{} ({} bytes)", bucket, key, data.len());
         Ok(etag)
     }
+
+    /// Store an object whose data is already written to a temporary file on disk.
+    ///
+    /// This is used by the streaming PUT handler: chunks are written to
+    /// `temp_path` incrementally while the hash is computed, then this method
+    /// performs the atomic rename, metadata write, versioning bookkeeping, etc.
+    pub async fn put_object_from_path(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: Option<String>,
+        metadata: HashMap<String, String>,
+        temp_path: &std::path::Path,
+        size: u64,
+        etag: String,
+    ) -> Result<String, StorageError> {
+        Self::validate_key(key)?;
+
+        if !self.bucket_exists(bucket).await? {
+            return Err(StorageError::BucketNotFound);
+        }
+
+        let object_path = self.object_path(bucket, key);
+        if let Some(parent) = object_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // Handle compression: if enabled, read the temp file, compress,
+        // and write the compressed data back before the atomic rename.
+        let mut metadata = metadata;
+        match self.compression {
+            CompressionMode::Zstd(level) => {
+                let raw_data = fs::read(temp_path).await?;
+                let compressed = zstd::encode_all(raw_data.as_slice(), level)
+                    .map_err(|e| StorageError::Internal(format!("zstd compression failed: {e}")))?;
+                let compressed_size = compressed.len() as u64;
+                crate::metrics::record_compression("zstd", size, compressed_size);
+                metadata.insert("__compression__".to_string(), "zstd".to_string());
+                metadata.insert("__original_size__".to_string(), size.to_string());
+                fs::write(temp_path, &compressed).await?;
+            }
+            CompressionMode::Lz4 => {
+                let raw_data = fs::read(temp_path).await?;
+                let compressed = lz4_flex::compress_prepend_size(&raw_data);
+                let compressed_size = compressed.len() as u64;
+                crate::metrics::record_compression("lz4", size, compressed_size);
+                metadata.insert("__compression__".to_string(), "lz4".to_string());
+                metadata.insert("__original_size__".to_string(), size.to_string());
+                fs::write(temp_path, &compressed).await?;
+            }
+            CompressionMode::None => {}
+        }
+
+        // Atomic rename from temp path to final object path.
+        if let Err(e) = fs::rename(temp_path, &object_path).await {
+            let _ = fs::remove_file(temp_path).await;
+            return Err(StorageError::Io(e));
+        }
+
+        let ct = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+        let obj_metadata = ObjectMetadata {
+            key: key.to_string(),
+            size,
+            etag: etag.clone(),
+            last_modified: Utc::now(),
+            content_type: ct,
+            metadata,
+            schema_version: 1,
+        };
+        self.save_metadata(bucket, key, &obj_metadata).await?;
+
+        // Record versioning if enabled.
+        if let Ok(versioning_cfg) = self.versioning_manager.get_config(bucket).await {
+            match versioning_cfg.status {
+                crate::storage::VersioningStatus::Enabled
+                | crate::storage::VersioningStatus::Suspended => {
+                    let version = crate::storage::versioning::ObjectVersionMetadata::new(
+                        key.to_string(),
+                        obj_metadata.size,
+                        etag.clone(),
+                    );
+                    if let Err(e) = self
+                        .versioning_manager
+                        .add_version(bucket, key.to_string(), version)
+                        .await
+                    {
+                        error!("Failed to record version for {}/{}: {}", bucket, key, e);
+                    }
+                }
+                crate::storage::VersioningStatus::Unversioned => {}
+            }
+        }
+
+        crate::metrics::record_object_size(bucket, size);
+        info!("Put object from path: {}/{} ({} bytes)", bucket, key, size);
+        Ok(etag)
+    }
+
     /// Delete an object
     pub async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
         if !self.bucket_exists(bucket).await? {
@@ -446,6 +850,21 @@ impl StorageEngine {
         let tagging_path = self.tagging_path(bucket, key);
         if object_path.exists() {
             fs::remove_file(&object_path).await?;
+            // Clean up empty parent directories within the objects sub-tree to
+            // avoid leaving orphan directories when keys contain `/` separators.
+            let objects_root = self.bucket_path(bucket).join("objects");
+            if let Some(mut parent) = object_path.parent() {
+                while parent != objects_root {
+                    // Attempt to remove the directory — this is a no-op if not empty.
+                    if fs::remove_dir(parent).await.is_err() {
+                        break;
+                    }
+                    match parent.parent() {
+                        Some(p) => parent = p,
+                        None => break,
+                    }
+                }
+            }
         } else {
             return Err(StorageError::NotFound(format!(
                 "Object '{}/{}' not found",
@@ -454,6 +873,19 @@ impl StorageEngine {
         }
         if metadata_path.exists() {
             let _ = fs::remove_file(&metadata_path).await;
+            // Clean up empty parent directories within the metadata sub-tree.
+            let metadata_root = self.bucket_path(bucket).join("metadata");
+            if let Some(mut parent) = metadata_path.parent() {
+                while parent != metadata_root {
+                    if fs::remove_dir(parent).await.is_err() {
+                        break;
+                    }
+                    match parent.parent() {
+                        Some(p) => parent = p,
+                        None => break,
+                    }
+                }
+            }
         }
         if sci_metadata_path.exists() {
             let _ = fs::remove_file(&sci_metadata_path).await;
@@ -528,7 +960,37 @@ impl StorageEngine {
         let data = serde_json::to_vec_pretty(metadata).map_err(|e| {
             StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })?;
-        fs::write(&path, data).await?;
+
+        // Atomic write: write to tmp file then rename into place so that readers
+        // never observe a partially-written metadata file.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_path = PathBuf::from(format!("{}.tmp.{}", path.display(), nanos));
+
+        let write_result: Result<(), StorageError> = async {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .await?;
+            file.write_all(&data).await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = write_result {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(e);
+        }
+
+        if let Err(e) = fs::rename(&tmp_path, &path).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(StorageError::Io(e));
+        }
+
         Ok(())
     }
     /// Get scientific metadata
@@ -821,19 +1283,15 @@ impl StorageEngine {
                 StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             })?;
         for (part_number, expected_etag) in parts {
-            let part_meta = multipart_metadata
-                .parts
-                .get(part_number)
-                .ok_or(StorageError::MultipartNotFound)?;
+            let part_meta = multipart_metadata.parts.get(part_number).ok_or_else(|| {
+                StorageError::InvalidPart(format!("Part {} was not uploaded", part_number))
+            })?;
             let stored_etag = part_meta.etag.trim_matches('"').trim().to_lowercase();
             let expected_etag_normalized = expected_etag.trim_matches('"').trim().to_lowercase();
             if stored_etag != expected_etag_normalized {
-                return Err(StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "ETag mismatch: stored={}, expected={}",
-                        stored_etag, expected_etag_normalized
-                    ),
+                return Err(StorageError::InvalidPart(format!(
+                    "ETag mismatch for part {}: stored={}, expected={}",
+                    part_number, stored_etag, expected_etag_normalized
                 )));
             }
         }
@@ -864,6 +1322,7 @@ impl StorageEngine {
             last_modified: Utc::now(),
             content_type: multipart_metadata.content_type.clone(),
             metadata: multipart_metadata.metadata.clone(),
+            schema_version: 1,
         };
         self.save_metadata(bucket, key, &obj_metadata).await?;
         let multipart_dir = self.multipart_path(bucket, upload_id);
@@ -950,6 +1409,77 @@ impl StorageEngine {
         }
         Ok(uploads)
     }
+    /// Garbage-collect abandoned multipart uploads older than `retention_hours` hours.
+    ///
+    /// Scans all buckets (or just `bucket` if `Some`) and removes upload directories whose
+    /// `initiated` timestamp is older than the retention window.
+    ///
+    /// Returns the total number of uploads removed.
+    pub async fn gc_abandoned_multipart(
+        &self,
+        bucket: Option<&str>,
+        retention_hours: u64,
+    ) -> Result<u64, StorageError> {
+        let cutoff = Utc::now() - chrono::Duration::hours(retention_hours as i64);
+
+        let buckets: Vec<String> = match bucket {
+            Some(b) => {
+                if !self.bucket_exists(b).await? {
+                    return Err(StorageError::BucketNotFound);
+                }
+                vec![b.to_string()]
+            }
+            None => self
+                .list_buckets()
+                .await?
+                .into_iter()
+                .map(|m| m.name)
+                .collect(),
+        };
+
+        let mut removed: u64 = 0;
+
+        for bucket_name in &buckets {
+            let multipart_dir = self.bucket_path(bucket_name).join("multipart");
+            if !multipart_dir.exists() {
+                continue;
+            }
+
+            let mut entries = match fs::read_dir(&multipart_dir).await {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let upload_id = entry.file_name().to_string_lossy().to_string();
+                let metadata_path = self.multipart_metadata_path(bucket_name, &upload_id);
+                if !metadata_path.exists() {
+                    continue;
+                }
+                let metadata_data = match fs::read(&metadata_path).await {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let mm: MultipartMetadata = match serde_json::from_slice(&metadata_data) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if mm.initiated < cutoff {
+                    let upload_dir = self.multipart_path(bucket_name, &upload_id);
+                    if fs::remove_dir_all(&upload_dir).await.is_ok() {
+                        removed += 1;
+                        info!(
+                            "GC: removed abandoned multipart upload {}/{} ({})",
+                            bucket_name, mm.key, upload_id
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
+    }
+
     /// Enable versioning for a bucket
     pub async fn enable_bucket_versioning(&self, bucket: &str) -> Result<(), StorageError> {
         if !self.bucket_exists(bucket).await? {
@@ -1213,14 +1743,38 @@ pub enum StorageError {
     BucketAlreadyExists,
     #[error("Bucket not empty")]
     BucketNotEmpty,
+    #[error("Access denied")]
+    AccessDenied,
+    #[error("Invalid bucket name: {0}")]
+    InvalidBucketName(String),
+    #[error("Too many buckets")]
+    TooManyBuckets,
     #[error("Invalid range")]
     InvalidRange,
     #[error("Multipart upload not found")]
     MultipartNotFound,
     #[error("Invalid part number")]
     InvalidPartNumber,
+    #[error("Invalid part: {0}")]
+    InvalidPart(String),
     #[error("Internal error: {0}")]
     Internal(String),
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+    /// Returned when an object key contains path traversal sequences or null bytes.
+    #[error("Invalid key: {0}")]
+    InvalidKey(String),
+    /// Returned when the underlying filesystem has no space left (ENOSPC).
+    #[error("Insufficient storage: no space left on device")]
+    InsufficientStorage,
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(e: std::io::Error) -> Self {
+        match e.kind() {
+            std::io::ErrorKind::PermissionDenied => StorageError::AccessDenied,
+            std::io::ErrorKind::StorageFull => StorageError::InsufficientStorage,
+            _ => StorageError::Io(e),
+        }
+    }
 }

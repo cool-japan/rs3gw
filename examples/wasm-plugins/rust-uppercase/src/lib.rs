@@ -108,14 +108,41 @@ mod tests {
 
     #[test]
     fn test_uppercase_transform() {
+        // Test the transform function directly (works on both native and WASM)
+        let input = b"hello world";
+        let result_ptr = transform(input.as_ptr(), input.len());
+
+        // On native 64-bit, we can safely read the output using the full pointer
+        // The transform function returns the actual pointer without truncation
+        let expected = "HELLO WORLD";
+        let output = unsafe { slice::from_raw_parts(result_ptr, expected.len()) };
+        let output_str = core::str::from_utf8(output).expect("valid UTF-8");
+
+        assert_eq!(output_str, expected);
+    }
+
+    #[test]
+    fn test_uppercase_transform_non_ascii() {
+        let input = b"hello 123 world!";
+        let result_ptr = transform(input.as_ptr(), input.len());
+
+        let expected = "HELLO 123 WORLD!";
+        let output = unsafe { slice::from_raw_parts(result_ptr, expected.len()) };
+        let output_str = core::str::from_utf8(output).expect("valid UTF-8");
+
+        assert_eq!(output_str, expected);
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_transform_with_length_wasm() {
+        // This test only runs on WASM where 32-bit pointer packing is valid
         let input = b"hello world";
         let result = transform_with_length(input.as_ptr(), input.len());
 
-        // Extract length and pointer
         let output_len = (result >> 32) as usize;
         let output_ptr = (result & 0xFFFFFFFF) as *const u8;
 
-        // Read the output
         let output = unsafe { slice::from_raw_parts(output_ptr, output_len) };
         let output_str = core::str::from_utf8(output).expect("valid UTF-8");
 

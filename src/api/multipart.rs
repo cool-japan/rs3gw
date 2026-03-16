@@ -37,6 +37,10 @@ pub struct MultipartQuery {
     #[serde(rename = "partNumber")]
     pub part_number: Option<u32>,
     pub uploads: Option<String>,
+    #[serde(rename = "max-parts")]
+    pub max_parts: Option<u32>,
+    #[serde(rename = "part-number-marker")]
+    pub part_number_marker: Option<u32>,
 }
 
 /// Initiate a multipart upload
@@ -477,7 +481,7 @@ pub async fn abort_multipart_upload(
     }
 }
 
-/// List parts for a multipart upload
+/// List parts for a multipart upload (supports max-parts and part-number-marker pagination)
 pub async fn list_parts(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
@@ -495,18 +499,39 @@ pub async fn list_parts(
         }
     };
 
+    let max_parts = params.max_parts.unwrap_or(1000) as usize;
+    let part_number_marker = params.part_number_marker.unwrap_or(0);
+
     info!(
         bucket = %bucket,
         key = %key,
         upload_id = %upload_id,
+        max_parts = %max_parts,
+        part_number_marker = %part_number_marker,
         "ListParts"
     );
 
     match state.storage.list_parts(&bucket, &key, &upload_id).await {
-        Ok(parts) => {
+        Ok(all_parts) => {
             let mut result = ListPartsResult::new(&bucket, &key, &upload_id);
+            result.max_parts = max_parts as u32;
+            result.part_number_marker = part_number_marker;
 
-            result.parts = parts
+            // Filter parts after the marker and apply max_parts limit
+            let filtered: Vec<_> = all_parts
+                .into_iter()
+                .filter(|p| p.part_number > part_number_marker)
+                .collect();
+
+            let is_truncated = filtered.len() > max_parts;
+            let page: Vec<_> = filtered.into_iter().take(max_parts).collect();
+
+            if let Some(last) = page.last() {
+                result.next_part_number_marker = last.part_number;
+            }
+            result.is_truncated = is_truncated;
+
+            result.parts = page
                 .into_iter()
                 .map(|p| PartElement {
                     part_number: p.part_number,
@@ -515,10 +540,6 @@ pub async fn list_parts(
                     size: p.size,
                 })
                 .collect();
-
-            if let Some(last) = result.parts.last() {
-                result.next_part_number_marker = last.part_number;
-            }
 
             (
                 StatusCode::OK,

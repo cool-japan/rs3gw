@@ -77,6 +77,8 @@ pub async fn setup_test_server() -> (Client, TempDir, TestServer) {
         dedup: rs3gw::storage::DedupConfig::disabled(),    // Dedup disabled for tests
         zerocopy: rs3gw::storage::ZeroCopyConfig::default(),
         select_cache: rs3gw::SelectCacheConfig::default(), // Select cache enabled for tests
+        multipart_retention_hours: 168,
+        fsync: false,
     };
     // Initialize preprocessing manager
     let preprocessing_path = temp_dir.path().join("preprocessing");
@@ -119,6 +121,11 @@ pub async fn setup_test_server() -> (Client, TempDir, TestServer) {
         metrics_tracker,
         training_manager,
         start_time: std::time::Instant::now(),
+        verifier: None,
+        auth_failure_counts: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        in_flight: rs3gw::InFlightTracker::new(),
     };
 
     let app = axum::Router::new()
@@ -196,6 +203,8 @@ pub async fn setup_test_server_with_auth() -> (Client, TempDir, TestServer) {
         dedup: rs3gw::storage::DedupConfig::disabled(),
         zerocopy: rs3gw::storage::ZeroCopyConfig::default(),
         select_cache: rs3gw::SelectCacheConfig::default(),
+        multipart_retention_hours: 168,
+        fsync: false,
     };
     // Initialize preprocessing manager
     let preprocessing_path = temp_dir.path().join("preprocessing");
@@ -238,6 +247,11 @@ pub async fn setup_test_server_with_auth() -> (Client, TempDir, TestServer) {
         metrics_tracker,
         training_manager,
         start_time: std::time::Instant::now(),
+        verifier: None,
+        auth_failure_counts: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        in_flight: rs3gw::InFlightTracker::new(),
     };
 
     let app = axum::Router::new()

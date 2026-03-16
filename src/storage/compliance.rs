@@ -175,7 +175,7 @@ impl<'a> ComplianceReporter<'a> {
             ..Default::default()
         };
 
-        let events = self.audit_logger.query(filter).await?;
+        let events: Vec<AuditEvent> = self.audit_logger.query(filter).await?;
         report.statistics.total_events = events.len();
 
         // Analyze events

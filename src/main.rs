@@ -18,9 +18,20 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use rs3gw::api::s3_router;
+use rs3gw::grpc::{GrpcConfig, GrpcServer};
 use rs3gw::metrics::{init_metrics, metrics_layer, metrics_tracker_layer};
 use rs3gw::storage::StorageEngine;
-use rs3gw::{AppState, Config};
+use rs3gw::{AppState, Config, InFlightGuard};
+
+/// Middleware that tracks in-flight requests for graceful shutdown drain
+async fn in_flight_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let _guard = InFlightGuard::new(&state.in_flight);
+    next.run(request).await
+}
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -56,8 +67,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ensure storage directory exists
     tokio::fs::create_dir_all(&config.storage_root).await?;
 
+    let checksum_validation = std::env::var("RS3GW_CHECKSUM_VALIDATION")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+    if checksum_validation {
+        info!("Checksum validation on read: enabled");
+    }
+
     let storage = Arc::new(
-        StorageEngine::new(config.storage_root.clone())?.with_compression(config.compression),
+        StorageEngine::new(config.storage_root.clone())?
+            .with_compression(config.compression)
+            .with_checksum_validation(checksum_validation),
     );
 
     // Initialize optional managers from environment
@@ -89,10 +109,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None, // QuotaSettings - requires async initialization
     );
 
+    // Start background multipart GC (runs every hour)
+    let _gc_handle = rs3gw::storage::gc::spawn_multipart_gc(
+        state.storage.clone(),
+        state.config.multipart_retention_hours,
+        3600, // run every hour
+    );
+    info!(
+        "Background multipart GC started (retention={}h, interval=3600s)",
+        config.multipart_retention_hours
+    );
+
     // Start background metrics collection for predictive analytics
     // Collect metrics every 60 seconds
     info!("Starting background metrics collection for predictive analytics");
     state.start_metrics_collection(60);
+
+    // Conditionally start gRPC server from environment configuration
+    let grpc_config = GrpcConfig::from_env();
+    if grpc_config.enabled {
+        let grpc_storage = state.storage.clone();
+        tokio::spawn(async move {
+            let grpc_server = GrpcServer::new(grpc_storage, grpc_config.bind_addr);
+            if let Err(e) = grpc_server.serve_with_config(grpc_config).await {
+                tracing::error!("gRPC server error: {}", e);
+            }
+        });
+        info!("gRPC server spawned");
+    }
 
     // Configure CORS - permissive for S3 compatibility
     let cors = CorsLayer::new()
@@ -110,10 +154,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.clone(),
             metrics_tracker_layer,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            in_flight_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .with_state(state);
+        .with_state(state.clone());
 
     // Add timeout layer if configured (0 = no timeout)
     if config.request_timeout_secs > 0 {
@@ -162,7 +210,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     }
 
-    info!("rs3gw server shut down gracefully");
+    // Wait for in-flight requests to drain
+    info!("Waiting for in-flight requests to drain...");
+    state.in_flight.wait_drain(Duration::from_secs(30)).await;
+    info!("All in-flight requests drained, shutting down");
     Ok(())
 }
 

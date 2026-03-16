@@ -1,0 +1,35 @@
+name: Integration Smoke Test
+
+on:
+  push:
+    branches: [main, "0.*"]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Build release binary
+        run: cargo build --release --bin rs3gw
+      - name: Start rs3gw
+        run: |
+          mkdir -p /tmp/rs3gw-smoke
+          RS3GW_STORAGE_ROOT=/tmp/rs3gw-smoke \
+          RS3GW_ACCESS_KEY=testkey \
+          RS3GW_SECRET_KEY=testsecret \
+          ./target/release/rs3gw &
+          sleep 2
+      - name: Run aws-cli smoke tests
+        env:
+          AWS_ACCESS_KEY_ID: testkey
+          AWS_SECRET_ACCESS_KEY: testsecret
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          echo "hello world" > /tmp/test.txt
+          aws s3 mb s3://smoke-test --endpoint-url http://localhost:9000
+          aws s3 cp /tmp/test.txt s3://smoke-test/test.txt --endpoint-url http://localhost:9000
+          aws s3 ls s3://smoke-test --endpoint-url http://localhost:9000
+          aws s3 rm s3://smoke-test/test.txt --endpoint-url http://localhost:9000
+          aws s3 rb s3://smoke-test --endpoint-url http://localhost:9000

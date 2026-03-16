@@ -7,7 +7,7 @@
 //! - WASM plugin execution (feature-gated)
 
 pub mod compression;
-pub mod image;
+mod image;
 pub mod manager;
 mod types;
 pub mod video;

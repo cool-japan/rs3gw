@@ -1,12 +1,63 @@
-//! Bucket Stub Handlers
+//! Stub implementations for S3 bucket-level and object-level APIs not yet fully implemented.
 //!
-//! Implements stub handlers for bucket operations that are not yet fully implemented:
-//! - Encryption configuration
-//! - Lifecycle configuration
-//! - CORS configuration
-//! - Notification configuration
-//! - Logging configuration
-//! - Request payment configuration
+//! Each handler validates bucket existence (returning `NoSuchBucket` when appropriate)
+//! and returns either a fixed XML response, a "not found" error, or `NotImplemented`.
+//!
+//! | Method   | Query / Path                      | Operation                                  |
+//! |----------|-----------------------------------|--------------------------------------------|
+//! | GET      | `/{bucket}?accelerate`            | GetBucketAccelerateConfiguration           |
+//! | PUT      | `/{bucket}?accelerate`            | PutBucketAccelerateConfiguration           |
+//! | GET      | `/{bucket}?encryption`            | GetBucketEncryption                        |
+//! | PUT      | `/{bucket}?encryption`            | PutBucketEncryption                        |
+//! | DELETE   | `/{bucket}?encryption`            | DeleteBucketEncryption                     |
+//! | GET      | `/{bucket}?lifecycle`             | GetBucketLifecycleConfiguration            |
+//! | PUT      | `/{bucket}?lifecycle`             | PutBucketLifecycleConfiguration            |
+//! | DELETE   | `/{bucket}?lifecycle`             | DeleteBucketLifecycleConfiguration         |
+//! | GET      | `/{bucket}?cors`                  | GetBucketCors                              |
+//! | PUT      | `/{bucket}?cors`                  | PutBucketCors                              |
+//! | DELETE   | `/{bucket}?cors`                  | DeleteBucketCors                           |
+//! | GET      | `/{bucket}?notification`          | GetBucketNotificationConfiguration         |
+//! | PUT      | `/{bucket}?notification`          | PutBucketNotificationConfiguration         |
+//! | GET      | `/{bucket}?logging`               | GetBucketLogging                           |
+//! | PUT      | `/{bucket}?logging`               | PutBucketLogging                           |
+//! | GET      | `/{bucket}?requestPayment`        | GetBucketRequestPayment                    |
+//! | PUT      | `/{bucket}?requestPayment`        | PutBucketRequestPayment                    |
+//! | GET      | `/{bucket}?website`               | GetBucketWebsite                           |
+//! | PUT      | `/{bucket}?website`               | PutBucketWebsite                           |
+//! | DELETE   | `/{bucket}?website`               | DeleteBucketWebsite                        |
+//! | GET      | `/{bucket}?replication`           | GetBucketReplication                       |
+//! | PUT      | `/{bucket}?replication`           | PutBucketReplication                       |
+//! | DELETE   | `/{bucket}?replication`           | DeleteBucketReplication                    |
+//! | GET      | `/{bucket}?ownershipControls`     | GetBucketOwnershipControls                 |
+//! | PUT      | `/{bucket}?ownershipControls`     | PutBucketOwnershipControls                 |
+//! | DELETE   | `/{bucket}?ownershipControls`     | DeleteBucketOwnershipControls              |
+//! | GET      | `/{bucket}?publicAccessBlock`     | GetPublicAccessBlock                       |
+//! | PUT      | `/{bucket}?publicAccessBlock`     | PutPublicAccessBlock                       |
+//! | DELETE   | `/{bucket}?publicAccessBlock`     | DeletePublicAccessBlock                    |
+//! | GET      | `/{bucket}?intelligent-tiering`   | GetBucketIntelligentTieringConfiguration   |
+//! | PUT      | `/{bucket}?intelligent-tiering`   | PutBucketIntelligentTieringConfiguration   |
+//! | DELETE   | `/{bucket}?intelligent-tiering`   | DeleteBucketIntelligentTieringConfiguration|
+//! | GET      | `/{bucket}?object-lock`           | GetObjectLockConfiguration                 |
+//! | PUT      | `/{bucket}?object-lock`           | PutObjectLockConfiguration                 |
+//! | GET      | `/{bucket}?metrics`               | GetBucketMetricsConfiguration              |
+//! | PUT      | `/{bucket}?metrics`               | PutBucketMetricsConfiguration              |
+//! | DELETE   | `/{bucket}?metrics`               | DeleteBucketMetricsConfiguration           |
+//! | GET      | `/{bucket}?metrics&list`          | ListBucketMetricsConfigurations            |
+//! | GET      | `/{bucket}?analytics`             | GetBucketAnalyticsConfiguration            |
+//! | PUT      | `/{bucket}?analytics`             | PutBucketAnalyticsConfiguration            |
+//! | DELETE   | `/{bucket}?analytics`             | DeleteBucketAnalyticsConfiguration         |
+//! | GET      | `/{bucket}?analytics&list`        | ListBucketAnalyticsConfigurations          |
+//! | GET      | `/{bucket}?inventory`             | GetBucketInventoryConfiguration            |
+//! | PUT      | `/{bucket}?inventory`             | PutBucketInventoryConfiguration            |
+//! | DELETE   | `/{bucket}?inventory`             | DeleteBucketInventoryConfiguration         |
+//! | GET      | `/{bucket}?inventory&list`        | ListBucketInventoryConfigurations          |
+//! | GET      | `/{bucket}/{key}?legal-hold`      | GetObjectLegalHold                         |
+//! | PUT      | `/{bucket}/{key}?legal-hold`      | PutObjectLegalHold                         |
+//! | GET      | `/{bucket}/{key}?retention`       | GetObjectRetention                         |
+//! | PUT      | `/{bucket}/{key}?retention`       | PutObjectRetention                         |
+//! | POST     | `/{bucket}/{key}?select`          | SelectObjectContent                        |
+//! | GET      | `/{bucket}/{key}?torrent`         | GetObjectTorrent                           |
+//! | POST     | `/WriteGetObjectResponse`         | WriteGetObjectResponse                     |
 
 use axum::{
     body::Body,

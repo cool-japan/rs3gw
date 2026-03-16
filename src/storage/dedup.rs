@@ -444,10 +444,12 @@ impl DedupManager {
 
             // Check if block already exists
             if let Some(mut block_ref) = self.get_ref(&hash).await? {
-                // Block exists, increment reference count
+                // Block exists, increment reference count — full dedup savings on this block
+                let block_size = block_ref.size as u64;
                 block_ref.ref_count += 1;
                 self.save_ref(&block_ref).await?;
                 dedup_blocks += 1;
+                crate::metrics::record_dedup_savings(block_size, block_size);
                 debug!("Reusing block {} (ref_count={})", hash, block_ref.ref_count);
             } else {
                 // New block, store it

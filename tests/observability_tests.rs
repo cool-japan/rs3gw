@@ -10,6 +10,84 @@ use serde_json::Value;
 mod common;
 use common::TestServer;
 
+// ============================================================================
+// Metrics unit tests (no HTTP server required)
+// ============================================================================
+
+/// Verify that `record_object_size` registers the histogram in the Prometheus output.
+#[tokio::test]
+async fn test_object_size_metric_exists() {
+    // Ensure the global recorder is initialised and grab its handle.
+    let metrics_handle = rs3gw::metrics::init_metrics().expect("Failed to initialize metrics");
+
+    rs3gw::metrics::record_object_size("test-bucket", 1024);
+
+    let rendered = metrics_handle.render();
+    assert!(
+        rendered.contains("rs3gw_object_size_bytes"),
+        "Prometheus output should contain rs3gw_object_size_bytes; got:\n{}",
+        rendered
+    );
+}
+
+/// Verify that `record_dedup_savings` increments the counters and records the ratio.
+#[tokio::test]
+async fn test_dedup_savings_metric_recorded() {
+    let metrics_handle = rs3gw::metrics::init_metrics().expect("Failed to initialize metrics");
+
+    rs3gw::metrics::record_dedup_savings(500, 1000);
+
+    let rendered = metrics_handle.render();
+    assert!(
+        rendered.contains("rs3gw_dedup_total_bytes_saved"),
+        "Prometheus output should contain rs3gw_dedup_total_bytes_saved counter; got:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("rs3gw_dedup_operations_total"),
+        "Prometheus output should contain rs3gw_dedup_operations_total counter; got:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("rs3gw_dedup_savings_ratio"),
+        "Prometheus output should contain rs3gw_dedup_savings_ratio histogram; got:\n{}",
+        rendered
+    );
+}
+
+/// Verify that histogram buckets are configured for `rs3gw_request_duration_ms`.
+///
+/// After recording a sample the Prometheus text format must contain `_bucket`
+/// lines with the expected `le` boundary values.
+#[tokio::test]
+async fn test_histogram_buckets_configured() {
+    let metrics_handle = rs3gw::metrics::init_metrics().expect("Failed to initialize metrics");
+
+    // Ensure describe metadata is registered with the active recorder.
+    rs3gw::metrics::configure_histogram_buckets();
+
+    // Record at least one sample so the histogram appears in the output.
+    rs3gw::metrics::record_latency("TestOp", 42.0);
+
+    let rendered = metrics_handle.render();
+
+    // The PrometheusBuilder was configured with explicit bucket boundaries;
+    // confirm that several expected `le` values appear in the rendered output.
+    for expected_le in &["0.1", "5", "100", "1000", "60000"] {
+        assert!(
+            rendered.contains(expected_le),
+            "Expected le={} bucket boundary in Prometheus output for rs3gw_request_duration_ms; got:\n{}",
+            expected_le,
+            rendered
+        );
+    }
+    assert!(
+        rendered.contains("rs3gw_request_duration_ms"),
+        "Prometheus output should contain rs3gw_request_duration_ms histogram; got:\n{}",
+        rendered
+    );
+}
+
 #[tokio::test]
 async fn test_profiling_endpoint() {
     let server = TestServer::new().await;
@@ -680,4 +758,111 @@ async fn test_all_prediction_endpoints_return_json() {
             .await
             .unwrap_or_else(|_| panic!("Endpoint {} should return valid JSON", endpoint));
     }
+}
+
+// ============================================================================
+// Compression metrics tests
+// ============================================================================
+
+/// Verify that `record_compression` with zstd algorithm registers counters in Prometheus output.
+#[tokio::test]
+async fn test_compression_metrics_zstd() {
+    let metrics_handle = rs3gw::metrics::init_metrics().expect("Failed to initialize metrics");
+
+    rs3gw::metrics::record_compression("zstd", 10000, 4500);
+
+    let rendered = metrics_handle.render();
+    assert!(
+        rendered.contains("rs3gw_compression_original_bytes"),
+        "Prometheus output should contain rs3gw_compression_original_bytes; got:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("rs3gw_compression_compressed_bytes"),
+        "Prometheus output should contain rs3gw_compression_compressed_bytes; got:\n{}",
+        rendered
+    );
+    // Verify the algorithm label is present
+    assert!(
+        rendered.contains("algorithm=\"zstd\""),
+        "Compression metrics should have algorithm=\"zstd\" label; got:\n{}",
+        rendered
+    );
+}
+
+/// Verify that `record_compression` with lz4 algorithm registers counters in Prometheus output.
+#[tokio::test]
+async fn test_compression_metrics_lz4() {
+    let metrics_handle = rs3gw::metrics::init_metrics().expect("Failed to initialize metrics");
+
+    rs3gw::metrics::record_compression("lz4", 8000, 5000);
+
+    let rendered = metrics_handle.render();
+    assert!(
+        rendered.contains("rs3gw_compression_original_bytes"),
+        "Prometheus output should contain rs3gw_compression_original_bytes; got:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("rs3gw_compression_compressed_bytes"),
+        "Prometheus output should contain rs3gw_compression_compressed_bytes; got:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("algorithm=\"lz4\""),
+        "Compression metrics should have algorithm=\"lz4\" label; got:\n{}",
+        rendered
+    );
+}
+
+/// Verify that `record_compression` records a compression ratio histogram sample.
+#[tokio::test]
+async fn test_compression_ratio_recorded() {
+    let metrics_handle = rs3gw::metrics::init_metrics().expect("Failed to initialize metrics");
+
+    // Ensure histogram description metadata is registered.
+    rs3gw::metrics::configure_histogram_buckets();
+
+    rs3gw::metrics::record_compression("zstd", 20000, 5000);
+
+    let rendered = metrics_handle.render();
+    assert!(
+        rendered.contains("rs3gw_compression_ratio"),
+        "Prometheus output should contain rs3gw_compression_ratio histogram; got:\n{}",
+        rendered
+    );
+    // The histogram should have bucket lines
+    assert!(
+        rendered.contains("rs3gw_compression_ratio_bucket"),
+        "Prometheus output should contain rs3gw_compression_ratio_bucket entries; got:\n{}",
+        rendered
+    );
+}
+
+/// Verify that compression metrics are absent when no compression is recorded.
+#[tokio::test]
+async fn test_compression_metrics_not_recorded_when_disabled() {
+    let metrics_handle = rs3gw::metrics::init_metrics().expect("Failed to initialize metrics");
+
+    // Record a plain object size metric (no compression).
+    rs3gw::metrics::record_object_size("no-compress-bucket", 2048);
+
+    let rendered = metrics_handle.render();
+
+    // The object size metric should be present.
+    assert!(
+        rendered.contains("rs3gw_object_size_bytes"),
+        "Prometheus output should contain rs3gw_object_size_bytes; got:\n{}",
+        rendered
+    );
+
+    // Compression counters should either be absent or have zero values.
+    // Since other tests in this process may have recorded compression metrics
+    // (due to global recorder), we check that no *new* algorithm label like
+    // "none" was introduced.
+    assert!(
+        !rendered.contains("algorithm=\"none\""),
+        "Compression metrics should not have algorithm=\"none\" label; got:\n{}",
+        rendered
+    );
 }

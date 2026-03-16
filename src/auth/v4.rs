@@ -3,6 +3,51 @@
 //! This module implements AWS SigV4 authentication for S3 API requests.
 //! Supports both header-based and presigned URL authentication.
 //! Includes timestamp validation (±15 minutes) for production security.
+//!
+//! # Canonical headers
+//!
+//! The SigV4 canonical-headers string is constructed from a selected subset of request headers:
+//!
+//! * `host` — always included; the value is the server hostname (and port if non-standard).
+//! * All `x-amz-*` headers present in the request — e.g. `x-amz-date`, `x-amz-content-sha256`,
+//!   `x-amz-security-token`.
+//! * Any additional headers that the signer explicitly lists in `SignedHeaders`.
+//!
+//! ## Header name canonicalization
+//!
+//! Header names are converted to **lowercase** before being included in the canonical string.
+//! The set of signed headers is then **sorted lexicographically** by the lowercased name.
+//! This ensures a deterministic ordering that both the signer and verifier agree on regardless
+//! of the order in which headers appear in the HTTP request.
+//!
+//! ## Canonical headers string format
+//!
+//! Each signed header contributes one line of the form:
+//!
+//! ```text
+//! header-name:trimmed-value\n
+//! ```
+//!
+//! * `header-name` — lowercase header name.
+//! * `trimmed-value` — leading and trailing whitespace removed from the header value; consecutive
+//!   interior whitespace is collapsed to a single space (the "trim" step in the AWS docs).
+//! * Each entry is terminated by a newline (`\n`), including the last one.  The canonical-headers
+//!   component of the canonical request therefore always ends with a newline, and there is no
+//!   separate trailing newline added after the last entry.
+//!
+//! ## `x-amz-content-sha256: UNSIGNED-PAYLOAD`
+//!
+//! When the SHA-256 hash of the request body is not computed by the client (e.g. for streaming
+//! uploads or when the body length is unknown at signing time), the literal string
+//! `UNSIGNED-PAYLOAD` is used as the payload-hash component of the canonical request.
+//!
+//! * The client sets the `x-amz-content-sha256` header to `UNSIGNED-PAYLOAD`.
+//! * The verifier reads this header value and passes it verbatim as the `payload_hash` argument
+//!   to [`SigV4Verifier::verify_request`] — no SHA-256 computation is performed on the body.
+//! * This header **must** be included in `SignedHeaders` when the client sends it, so that its
+//!   value is covered by the signature.
+//! * Presigned URLs always use `UNSIGNED-PAYLOAD` as the payload hash because the body is not
+//!   known at URL-generation time.
 
 #![allow(dead_code)]
 

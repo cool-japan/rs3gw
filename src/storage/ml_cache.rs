@@ -1108,6 +1108,7 @@ mod tests {
             last_modified: Utc::now(),
             content_type: "text/plain".to_string(),
             metadata: HashMap::new(),
+            schema_version: 1,
         };
 
         let data = Bytes::from("test data");
@@ -1156,6 +1157,7 @@ mod tests {
                 last_modified: Utc::now(),
                 content_type: "application/octet-stream".to_string(),
                 metadata: HashMap::new(),
+                schema_version: 1,
             };
 
             cache
@@ -1184,6 +1186,7 @@ mod tests {
             last_modified: Utc::now(),
             content_type: "text/plain".to_string(),
             metadata: HashMap::new(),
+            schema_version: 1,
         };
 
         cache
@@ -1274,6 +1277,7 @@ mod tests {
                 last_modified: Utc::now(),
                 content_type: "text/plain".to_string(),
                 metadata: HashMap::new(),
+                schema_version: 1,
             };
 
             let data = Bytes::from(format!("data {}", i));
@@ -1330,6 +1334,7 @@ mod tests {
             last_modified: Utc::now(),
             content_type: "text/plain".to_string(),
             metadata: HashMap::new(),
+            schema_version: 1,
         };
 
         // Simulate regular access pattern
@@ -1378,6 +1383,7 @@ mod tests {
                 last_modified: Utc::now(),
                 content_type: "text/plain".to_string(),
                 metadata: HashMap::new(),
+                schema_version: 1,
             };
 
             cache

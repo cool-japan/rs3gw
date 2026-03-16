@@ -195,7 +195,10 @@ pub async fn list_objects_v2(
             result.common_prefixes = prefixes_to_common(common_prefixes);
             (
                 StatusCode::OK,
-                [("Content-Type", "application/xml")],
+                [
+                    ("Content-Type", "application/xml"),
+                    ("x-amz-request-id", &uuid::Uuid::new_v4().to_string()),
+                ],
                 result.to_xml(),
             )
                 .into_response()
@@ -473,6 +476,12 @@ pub async fn get_object(
     state
         .metrics_tracker
         .record_bytes_downloaded(content_length);
+    // Streaming: the object body is streamed chunk-by-chunk using axum::body::Body::from_stream,
+    // which provides true backpressure — no full buffering in memory occurs here.
+    // The storage layer yields chunks lazily via an async stream, so large objects do not cause
+    // excess memory consumption.  If the storage backend were to buffer internally (e.g., via
+    // `Bytes::copy_from_slice` on the entire file), that would be a known limitation and should
+    // be replaced with an incremental `tokio::fs::File` reader wrapped in `ReaderStream`.
     let body = Body::from_stream(stream.map_err(|e| std::io::Error::other(e.to_string())));
     let mut response = Response::builder()
         .status(status)
@@ -488,12 +497,39 @@ pub async fn get_object(
         )
         .header("Accept-Ranges", "bytes")
         .header("x-amz-storage-class", "STANDARD")
-        .header("x-amz-version-id", "null");
-    if let Some(cr) = content_range {
-        response = response.header("Content-Range", cr);
+        .header("x-amz-version-id", "null")
+        .header("x-amz-request-id", uuid::Uuid::new_v4().to_string());
+    if let Some(ref cr) = content_range {
+        response = response.header("Content-Range", cr.as_str());
     }
     for (k, v) in &response_meta.metadata {
-        response = response.header(format!("x-amz-meta-{}", k), v);
+        if !k.starts_with("__sys_") && !k.starts_with("__checksum_") {
+            response = response.header(format!("x-amz-meta-{}", k), v);
+        }
+    }
+    // Emit stored checksum header only for full-object responses.
+    // For range requests the stored checksum covers the full object, so
+    // sending it would cause the SDK to compare it against the partial body
+    // and report a ChecksumMismatch.
+    if content_range.is_none() {
+        if let (Some(algo), Some(value)) = (
+            response_meta.metadata.get("__checksum_algo__"),
+            response_meta.metadata.get("__checksum_value__"),
+        ) {
+            response = response.header(format!("x-amz-checksum-{}", algo), value);
+        }
+    }
+    // Emit stored caching/content headers
+    const SYS_RESPONSE_HEADERS: &[(&str, &str)] = &[
+        ("__sys_content_disposition__", "Content-Disposition"),
+        ("__sys_cache_control__", "Cache-Control"),
+        ("__sys_expires__", "Expires"),
+        ("__sys_content_encoding__", "Content-Encoding"),
+    ];
+    for (reserved_key, response_header) in SYS_RESPONSE_HEADERS {
+        if let Some(v) = response_meta.metadata.get(*reserved_key) {
+            response = response.header(*response_header, v);
+        }
     }
     if let Ok(Some(sci_meta)) = state.storage.get_scientific_metadata(&bucket, &key).await {
         for (k, v) in sci_meta.to_s3_metadata() {

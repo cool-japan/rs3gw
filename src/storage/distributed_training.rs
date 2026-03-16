@@ -27,7 +27,7 @@
 //! };
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let manager = TrainingManager::new("./training-data".into()).await?;
+//! let manager = TrainingManager::new("./training-data".into());
 //!
 //! // Start a new experiment
 //! let exp_config = ExperimentConfig {
@@ -60,7 +60,7 @@
 //!
 //! // Resume from checkpoint
 //! let restored = manager.load_checkpoint(&checkpoint.id).await?;
-//! println!("Resumed from epoch {}", restored.epoch);
+//! println!("Resumed from epoch {}", restored.checkpoint.epoch);
 //!
 //! # Ok(())
 //! # }
@@ -440,7 +440,7 @@ impl TrainingManager {
             created_at: Utc::now(),
             metrics: metrics.clone(),
             shard_count: 1,
-            total_size: (model_state.len() + optimizer_state.as_ref().map(|s| s.len()).unwrap_or(0))
+            total_size: (model_state.len() + optimizer_state.as_ref().map_or(0, |s| s.len()))
                 as u64,
             has_optimizer_state: optimizer_state.is_some(),
             is_sharded: false,
@@ -835,7 +835,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn setup_manager() -> (TrainingManager, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
         let manager = TrainingManager::new(temp_dir.path().to_path_buf());
         (manager, temp_dir)
     }
@@ -851,7 +851,10 @@ mod tests {
             hyperparameters: serde_json::json!({"lr": 0.001}),
         };
 
-        let exp = manager.create_experiment(config).await.unwrap();
+        let exp = manager
+            .create_experiment(config)
+            .await
+            .expect("create experiment should succeed");
         assert_eq!(exp.name, "test-exp");
         assert_eq!(exp.status, ExperimentStatus::Running);
         assert_eq!(exp.checkpoint_count, 0);
@@ -868,7 +871,10 @@ mod tests {
             hyperparameters: serde_json::json!({}),
         };
 
-        let exp = manager.create_experiment(config).await.unwrap();
+        let exp = manager
+            .create_experiment(config)
+            .await
+            .expect("create experiment should succeed");
 
         let model_state = b"model_data".to_vec();
         let optimizer_state = Some(b"optimizer_data".to_vec());
@@ -883,12 +889,15 @@ mod tests {
                 metrics,
             )
             .await
-            .unwrap();
+            .expect("save checkpoint should succeed");
 
         assert_eq!(ckpt.epoch, 1);
         assert!(ckpt.has_optimizer_state);
 
-        let loaded = manager.load_checkpoint(&ckpt.id).await.unwrap();
+        let loaded = manager
+            .load_checkpoint(&ckpt.id)
+            .await
+            .expect("load checkpoint should succeed");
         assert_eq!(loaded.model_state, model_state);
         assert_eq!(loaded.optimizer_state, optimizer_state);
         assert_eq!(loaded.checkpoint.epoch, 1);
@@ -905,18 +914,24 @@ mod tests {
             hyperparameters: serde_json::json!({}),
         };
 
-        let exp = manager.create_experiment(config).await.unwrap();
+        let exp = manager
+            .create_experiment(config)
+            .await
+            .expect("create experiment should succeed");
 
         manager
             .log_metrics(&exp.id, 1, serde_json::json!({"loss": 0.5}))
             .await
-            .unwrap();
+            .expect("log metrics step 1 should succeed");
         manager
             .log_metrics(&exp.id, 2, serde_json::json!({"loss": 0.4}))
             .await
-            .unwrap();
+            .expect("log metrics step 2 should succeed");
 
-        let metrics = manager.get_metrics(&exp.id).await.unwrap();
+        let metrics = manager
+            .get_metrics(&exp.id)
+            .await
+            .expect("get metrics should succeed");
         assert_eq!(metrics.len(), 2);
         assert_eq!(metrics[0].step, 1);
         assert_eq!(metrics[1].step, 2);
@@ -933,7 +948,10 @@ mod tests {
             hyperparameters: serde_json::json!({}),
         };
 
-        let exp = manager.create_experiment(config).await.unwrap();
+        let exp = manager
+            .create_experiment(config)
+            .await
+            .expect("create experiment should succeed");
 
         // Save 3 checkpoints
         for epoch in 1..=3 {
@@ -946,10 +964,13 @@ mod tests {
                     serde_json::json!({"epoch": epoch}),
                 )
                 .await
-                .unwrap();
+                .expect("save checkpoint should succeed");
         }
 
-        let checkpoints = manager.list_checkpoints(&exp.id).await.unwrap();
+        let checkpoints = manager
+            .list_checkpoints(&exp.id)
+            .await
+            .expect("list checkpoints should succeed");
         assert_eq!(checkpoints.len(), 3);
         // Should be sorted by epoch descending
         assert_eq!(checkpoints[0].epoch, 3);
@@ -972,7 +993,10 @@ mod tests {
             hyperparameters: serde_json::json!({}),
         };
 
-        let exp = manager.create_experiment(config).await.unwrap();
+        let exp = manager
+            .create_experiment(config)
+            .await
+            .expect("create experiment should succeed");
 
         // Save 4 checkpoints
         for epoch in 1..=4 {
@@ -985,11 +1009,14 @@ mod tests {
                     serde_json::json!({"epoch": epoch}),
                 )
                 .await
-                .unwrap();
+                .expect("save checkpoint should succeed");
         }
 
         // Should only have 2 checkpoints (most recent)
-        let checkpoints = manager.list_checkpoints(&exp.id).await.unwrap();
+        let checkpoints = manager
+            .list_checkpoints(&exp.id)
+            .await
+            .expect("list checkpoints should succeed");
         assert_eq!(checkpoints.len(), 2);
         assert_eq!(checkpoints[0].epoch, 4);
         assert_eq!(checkpoints[1].epoch, 3);
@@ -1006,15 +1033,21 @@ mod tests {
             hyperparameters: serde_json::json!({}),
         };
 
-        let exp = manager.create_experiment(config).await.unwrap();
+        let exp = manager
+            .create_experiment(config)
+            .await
+            .expect("create experiment should succeed");
         assert_eq!(exp.status, ExperimentStatus::Running);
 
         manager
             .update_experiment_status(&exp.id, ExperimentStatus::Completed)
             .await
-            .unwrap();
+            .expect("update status should succeed");
 
-        let updated = manager.get_experiment(&exp.id).await.unwrap();
+        let updated = manager
+            .get_experiment(&exp.id)
+            .await
+            .expect("get experiment should succeed");
         assert_eq!(updated.status, ExperimentStatus::Completed);
     }
 
@@ -1030,7 +1063,7 @@ mod tests {
         let search = manager
             .create_search(search_space.clone(), "accuracy".to_string())
             .await
-            .unwrap();
+            .expect("create search should succeed");
 
         assert_eq!(search.optimization_metric, "accuracy");
         assert_eq!(search.trials.len(), 0);
@@ -1043,7 +1076,7 @@ mod tests {
                 TrialStatus::Completed,
             )
             .await
-            .unwrap();
+            .expect("add trial should succeed");
 
         // Verify trial was added (would need to reload from disk in real scenario)
     }
@@ -1054,10 +1087,8 @@ mod tests {
 
         let result = manager.get_experiment("nonexistent").await;
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            TrainingError::ExperimentNotFound(_)
-        ));
+        let err = result.expect_err("should fail for nonexistent experiment");
+        assert!(matches!(err, TrainingError::ExperimentNotFound(_)));
     }
 
     #[tokio::test]
@@ -1066,10 +1097,8 @@ mod tests {
 
         let result = manager.load_checkpoint("nonexistent").await;
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            TrainingError::CheckpointNotFound(_)
-        ));
+        let err = result.expect_err("should fail for nonexistent checkpoint");
+        assert!(matches!(err, TrainingError::CheckpointNotFound(_)));
     }
 
     #[tokio::test]
@@ -1083,13 +1112,14 @@ mod tests {
             hyperparameters: serde_json::json!({}),
         };
 
-        manager.create_experiment(config.clone()).await.unwrap();
+        manager
+            .create_experiment(config.clone())
+            .await
+            .expect("first create should succeed");
 
         let result = manager.create_experiment(config).await;
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            TrainingError::ExperimentAlreadyExists(_)
-        ));
+        let err = result.expect_err("duplicate experiment should fail");
+        assert!(matches!(err, TrainingError::ExperimentAlreadyExists(_)));
     }
 }

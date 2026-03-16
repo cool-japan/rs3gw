@@ -1150,119 +1150,704 @@ async fn test_post_object() {
     assert_eq!(response.status(), 400, "Missing file should return 400");
 }
 
-/// Test HEAD object with conditional headers
-#[tokio::test]
-async fn test_head_object_conditional() {
-    let (client, _temp_dir, server) = setup_test_server().await;
-    let bucket_name = format!("head-conditional-{}", uuid::Uuid::new_v4());
+// ============================================================
+// WS-7: Object API Test Matrix
+// ============================================================
 
-    // Create bucket
+// --- Keys with spaces: PUT, GET, HEAD, DELETE (4 of 8) ---
+
+/// PUT/GET/HEAD objects with space in key
+#[tokio::test]
+async fn test_space_key_put_get_head() {
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = "space-key-pgh-test";
     client
         .create_bucket()
-        .bucket(&bucket_name)
+        .bucket(bucket)
         .send()
         .await
-        .unwrap();
+        .expect("create bucket");
 
-    // Create object
-    let content = b"test content for conditional head";
+    // PUT
     client
         .put_object()
-        .bucket(&bucket_name)
-        .key("test.txt")
-        .body(aws_sdk_s3::primitives::ByteStream::from_static(content))
+        .bucket(bucket)
+        .key("foo bar")
+        .body(b"hello space".to_vec().into())
         .send()
         .await
-        .unwrap();
+        .expect("PUT space key");
 
-    // Get ETag from HEAD
-    let head_result = client
-        .head_object()
-        .bucket(&bucket_name)
-        .key("test.txt")
+    // GET - body matches
+    let body_bytes: &[u8] = b"hello space";
+    let get = client
+        .get_object()
+        .bucket(bucket)
+        .key("foo bar")
         .send()
         .await
-        .unwrap();
+        .expect("GET space key");
+    let returned = get.body.collect().await.expect("collect");
+    assert_eq!(returned.into_bytes().as_ref(), body_bytes);
 
-    let etag = head_result.e_tag().unwrap();
-
-    // Test If-Match with correct ETag - should succeed
-    let result = client
+    // HEAD - 200
+    let head = client
         .head_object()
-        .bucket(&bucket_name)
-        .key("test.txt")
-        .if_match(etag)
-        .send()
-        .await;
-    assert!(result.is_ok(), "HEAD with matching If-Match should succeed");
-
-    // Test If-Match with wrong ETag - should fail with 412 Precondition Failed
-    let result = client
-        .head_object()
-        .bucket(&bucket_name)
-        .key("test.txt")
-        .if_match("\"wrongetag\"")
-        .send()
-        .await;
-    assert!(
-        result.is_err(),
-        "HEAD with non-matching If-Match should fail"
-    );
-
-    // Test If-None-Match with different ETag - should succeed
-    let result = client
-        .head_object()
-        .bucket(&bucket_name)
-        .key("test.txt")
-        .if_none_match("\"differentetag\"")
-        .send()
-        .await;
-    assert!(
-        result.is_ok(),
-        "HEAD with non-matching If-None-Match should succeed"
-    );
-
-    // Test If-None-Match with same ETag - should return 304 Not Modified
-    let result = client
-        .head_object()
-        .bucket(&bucket_name)
-        .key("test.txt")
-        .if_none_match(etag)
-        .send()
-        .await;
-    // This returns an error (304) which SDK treats as error
-    assert!(
-        result.is_err(),
-        "HEAD with matching If-None-Match should return 304"
-    );
-
-    // Use HTTP client for direct header verification
-    let http_client = reqwest::Client::new();
-    let base_url = format!("http://{}", server.addr);
-
-    // Verify 412 status code directly
-    let response = http_client
-        .head(format!("{}/{}/test.txt", base_url, bucket_name))
-        .header("If-Match", "\"wrongetag\"")
+        .bucket(bucket)
+        .key("foo bar")
         .send()
         .await
-        .unwrap();
+        .expect("HEAD space key");
+    assert_eq!(head.content_length(), Some(11_i64));
+
+    // DELETE - 204 (no error)
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("foo bar")
+        .send()
+        .await
+        .expect("DELETE space key");
+    assert!(
+        client
+            .get_object()
+            .bucket(bucket)
+            .key("foo bar")
+            .send()
+            .await
+            .is_err(),
+        "object should be deleted"
+    );
+
+    // Batch DELETE including space key
+    for k in ["foo bar2", "normal-key"] {
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(k)
+            .body(b"x".to_vec().into())
+            .send()
+            .await
+            .expect("put");
+    }
+    let oids = vec![
+        ObjectIdentifier::builder()
+            .key("foo bar2")
+            .build()
+            .expect("oid1"),
+        ObjectIdentifier::builder()
+            .key("normal-key")
+            .build()
+            .expect("oid2"),
+    ];
+    let del = Delete::builder()
+        .set_objects(Some(oids))
+        .build()
+        .expect("delete");
+    let res = client
+        .delete_objects()
+        .bucket(bucket)
+        .delete(del)
+        .send()
+        .await
+        .expect("batch delete");
+    assert_eq!(res.deleted().len(), 2);
+}
+
+/// COPY from `foo bar` to `foo-bar-copy`; LIST V1 & V2 with prefix `foo`
+#[tokio::test]
+async fn test_space_key_copy_and_list() {
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = "space-key-cl-test";
+    client
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("create bucket");
+
+    let content = b"copy with space";
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("foo bar")
+        .body(content.to_vec().into())
+        .send()
+        .await
+        .expect("put source");
+    for k in ["foo-other", "bar-key"] {
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(k)
+            .body(b"d".to_vec().into())
+            .send()
+            .await
+            .expect("put extra");
+    }
+
+    // COPY - percent-encoded source
+    client
+        .copy_object()
+        .bucket(bucket)
+        .key("foo-bar-copy")
+        .copy_source(format!("{}/foo%20bar", bucket))
+        .send()
+        .await
+        .expect("COPY space key");
+    let got = client
+        .get_object()
+        .bucket(bucket)
+        .key("foo-bar-copy")
+        .send()
+        .await
+        .expect("get copy");
+    let body = got.body.collect().await.expect("collect").into_bytes();
+    assert_eq!(body.as_ref(), content);
+
+    // LIST V1 - includes `foo bar`
+    #[allow(deprecated)]
+    let v1 = client
+        .list_objects()
+        .bucket(bucket)
+        .prefix("foo")
+        .send()
+        .await
+        .expect("list v1");
+    let keys_v1: Vec<&str> = v1.contents().iter().filter_map(|o| o.key()).collect();
+    assert!(
+        keys_v1.contains(&"foo bar"),
+        "list v1 should contain 'foo bar': {:?}",
+        keys_v1
+    );
+
+    // LIST V2 - includes `foo bar`
+    let v2 = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix("foo")
+        .send()
+        .await
+        .expect("list v2");
+    let keys_v2: Vec<&str> = v2.contents().iter().filter_map(|o| o.key()).collect();
+    assert!(
+        keys_v2.contains(&"foo bar"),
+        "list v2 should contain 'foo bar': {:?}",
+        keys_v2
+    );
+}
+
+// --- Deep prefixes: PUT, GET, HEAD, DELETE, batch-DELETE, COPY, LIST V1, LIST V2 ---
+
+/// Deep prefix key `a/b/c/d/key` — PUT/GET/HEAD/DELETE/batch-DELETE
+#[tokio::test]
+async fn test_deep_prefix_crud() {
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = "deep-prefix-crud-test";
+    client
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("create bucket");
+    let key = "a/b/c/d/key";
+    let data: &[u8] = b"deep data!";
+
+    // PUT
+    client
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(data.to_vec().into())
+        .send()
+        .await
+        .expect("PUT deep");
+
+    // GET - body matches
+    let got = client
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .expect("GET deep");
+    let returned = got.body.collect().await.expect("collect").into_bytes();
+    assert_eq!(returned.as_ref(), data);
+
+    // HEAD
+    let head = client
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .expect("HEAD deep");
+    assert_eq!(head.content_length(), Some(10_i64));
+
+    // DELETE
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .expect("DELETE deep");
+    assert!(
+        client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .is_err(),
+        "deep key should be deleted"
+    );
+
+    // batch DELETE
+    for k in ["a/b/c/d/key2", "a/b/c/d/key3"] {
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(k)
+            .body(b"y".to_vec().into())
+            .send()
+            .await
+            .expect("put");
+    }
+    let oids = vec![
+        ObjectIdentifier::builder()
+            .key("a/b/c/d/key2")
+            .build()
+            .expect("oid1"),
+        ObjectIdentifier::builder()
+            .key("a/b/c/d/key3")
+            .build()
+            .expect("oid2"),
+    ];
+    let del = Delete::builder()
+        .set_objects(Some(oids))
+        .build()
+        .expect("delete");
+    let res = client
+        .delete_objects()
+        .bucket(bucket)
+        .delete(del)
+        .send()
+        .await
+        .expect("batch delete");
+    assert_eq!(res.deleted().len(), 2);
+}
+
+/// Deep prefix COPY and LIST V1 / V2
+#[tokio::test]
+async fn test_deep_prefix_copy_and_list() {
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = "deep-prefix-cl-test";
+    client
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("create bucket");
+
+    let content = b"deep copy src";
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("a/b/c/d/key")
+        .body(content.to_vec().into())
+        .send()
+        .await
+        .expect("put source");
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("a/b/c/d/other")
+        .body(b"z".to_vec().into())
+        .send()
+        .await
+        .expect("put other");
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("top-level")
+        .body(b"z".to_vec().into())
+        .send()
+        .await
+        .expect("put top");
+
+    // COPY
+    client
+        .copy_object()
+        .bucket(bucket)
+        .key("a/b/c/d/key-copy")
+        .copy_source(format!("{}/a/b/c/d/key", bucket))
+        .send()
+        .await
+        .expect("COPY deep");
+    let got = client
+        .get_object()
+        .bucket(bucket)
+        .key("a/b/c/d/key-copy")
+        .send()
+        .await
+        .expect("get copy");
+    let body = got.body.collect().await.expect("collect").into_bytes();
+    assert_eq!(body.as_ref(), content);
+
+    // LIST V1
+    #[allow(deprecated)]
+    let v1 = client
+        .list_objects()
+        .bucket(bucket)
+        .prefix("a/b/c/d/")
+        .send()
+        .await
+        .expect("list v1");
+    let keys_v1: Vec<&str> = v1.contents().iter().filter_map(|o| o.key()).collect();
+    assert!(
+        keys_v1.contains(&"a/b/c/d/key"),
+        "v1 should include deep key: {:?}",
+        keys_v1
+    );
     assert_eq!(
-        response.status(),
-        412,
-        "If-Match with wrong ETag should return 412"
+        keys_v1.len(),
+        3,
+        "should have key, other, key-copy: {:?}",
+        keys_v1
     );
 
-    // Verify 304 status code directly
-    let response = http_client
-        .head(format!("{}/{}/test.txt", base_url, bucket_name))
-        .header("If-None-Match", etag)
+    // LIST V2
+    let v2 = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix("a/b/c/d/")
         .send()
         .await
-        .unwrap();
+        .expect("list v2");
+    let keys_v2: Vec<&str> = v2.contents().iter().filter_map(|o| o.key()).collect();
+    assert!(
+        keys_v2.contains(&"a/b/c/d/key"),
+        "v2 should include deep key: {:?}",
+        keys_v2
+    );
     assert_eq!(
-        response.status(),
-        304,
-        "If-None-Match with same ETag should return 304"
+        keys_v2.len(),
+        3,
+        "should have key, other, key-copy: {:?}",
+        keys_v2
+    );
+}
+
+// --- Large object streaming (4 tests) ---
+
+/// PUT 64MB synthetic body — 200, ETag returned
+#[tokio::test]
+async fn test_large_object_put() {
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    client
+        .create_bucket()
+        .bucket("large-obj-put-test")
+        .send()
+        .await
+        .expect("create bucket");
+    let data = vec![0u8; 64 * 1024 * 1024];
+    let res = client
+        .put_object()
+        .bucket("large-obj-put-test")
+        .key("large.bin")
+        .body(data.into())
+        .send()
+        .await
+        .expect("PUT 64MB");
+    assert!(
+        res.e_tag().is_some(),
+        "PUT should return ETag for 64MB object"
+    );
+}
+
+/// GET back 64MB object — size matches
+#[tokio::test]
+async fn test_large_object_get() {
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    client
+        .create_bucket()
+        .bucket("large-obj-get-test")
+        .send()
+        .await
+        .expect("create bucket");
+    let size = 64 * 1024 * 1024usize;
+    client
+        .put_object()
+        .bucket("large-obj-get-test")
+        .key("large.bin")
+        .body(vec![0xABu8; size].into())
+        .send()
+        .await
+        .expect("PUT 64MB");
+    let get = client
+        .get_object()
+        .bucket("large-obj-get-test")
+        .key("large.bin")
+        .send()
+        .await
+        .expect("GET 64MB");
+    let returned = get.body.collect().await.expect("collect").into_bytes();
+    assert_eq!(returned.len(), size, "GET should return exactly 64MB");
+}
+
+/// HEAD 64MB object — Content-Length: 67108864
+#[tokio::test]
+async fn test_large_object_head() {
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    client
+        .create_bucket()
+        .bucket("large-obj-head-test")
+        .send()
+        .await
+        .expect("create bucket");
+    client
+        .put_object()
+        .bucket("large-obj-head-test")
+        .key("large.bin")
+        .body(vec![0u8; 64 * 1024 * 1024].into())
+        .send()
+        .await
+        .expect("PUT 64MB");
+    let head = client
+        .head_object()
+        .bucket("large-obj-head-test")
+        .key("large.bin")
+        .send()
+        .await
+        .expect("HEAD 64MB");
+    assert_eq!(head.content_length(), Some(67_108_864_i64));
+}
+
+/// Range GET bytes=0-1023 of 64MB object — 206, 1024 bytes
+#[tokio::test]
+async fn test_large_object_range_get() {
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    client
+        .create_bucket()
+        .bucket("large-obj-range-test")
+        .send()
+        .await
+        .expect("create bucket");
+    client
+        .put_object()
+        .bucket("large-obj-range-test")
+        .key("large.bin")
+        .body(vec![0x42u8; 64 * 1024 * 1024].into())
+        .send()
+        .await
+        .expect("PUT 64MB");
+    let get = client
+        .get_object()
+        .bucket("large-obj-range-test")
+        .key("large.bin")
+        .range("bytes=0-1023")
+        .send()
+        .await
+        .expect("range GET");
+    let bytes = get.body.collect().await.expect("collect").into_bytes();
+    assert_eq!(
+        bytes.len(),
+        1024,
+        "range GET bytes=0-1023 should return 1024 bytes"
+    );
+    assert!(
+        bytes.iter().all(|&b| b == 0x42),
+        "range data should match fill byte"
+    );
+}
+
+// --- Request IDs (6 tests) ---
+
+/// PUT, GET, HEAD, DELETE, ListObjects return x-amz-request-id; 404 also returns it
+#[tokio::test]
+async fn test_request_ids() {
+    let (client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+    let base = &server.base_url;
+    let bucket = "reqid-test";
+
+    client
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("create bucket");
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("f.txt")
+        .body(b"d".to_vec().into())
+        .send()
+        .await
+        .expect("put");
+
+    // PUT
+    let resp = http
+        .put(format!("{}/{}/f2.txt", base, bucket))
+        .body(b"d".to_vec())
+        .send()
+        .await
+        .expect("PUT");
+    assert!(
+        resp.headers().contains_key("x-amz-request-id"),
+        "PUT missing request-id"
+    );
+
+    // GET
+    let resp = http
+        .get(format!("{}/{}/f.txt", base, bucket))
+        .send()
+        .await
+        .expect("GET");
+    assert!(
+        resp.headers().contains_key("x-amz-request-id"),
+        "GET missing request-id"
+    );
+
+    // HEAD
+    let resp = http
+        .head(format!("{}/{}/f.txt", base, bucket))
+        .send()
+        .await
+        .expect("HEAD");
+    assert!(
+        resp.headers().contains_key("x-amz-request-id"),
+        "HEAD missing request-id"
+    );
+
+    // DELETE
+    let resp = http
+        .delete(format!("{}/{}/f.txt", base, bucket))
+        .send()
+        .await
+        .expect("DELETE");
+    assert!(
+        resp.headers().contains_key("x-amz-request-id"),
+        "DELETE missing request-id"
+    );
+
+    // ListObjects
+    let resp = http
+        .get(format!("{}/{}?list-type=2", base, bucket))
+        .send()
+        .await
+        .expect("list");
+    assert!(
+        resp.headers().contains_key("x-amz-request-id"),
+        "ListObjects missing request-id"
+    );
+
+    // 404 error
+    let resp = http
+        .get(format!("{}/no-such-bucket-reqid/no-key", base))
+        .send()
+        .await
+        .expect("404");
+    assert_eq!(resp.status(), 404);
+    assert!(
+        resp.headers().contains_key("x-amz-request-id"),
+        "404 missing request-id"
+    );
+}
+
+// --- URL encoding (4 tests) ---
+
+/// PUT `foo+bar`, GET `foo+bar` — roundtrip with plus sign
+#[tokio::test]
+async fn test_url_encoding_plus_key() {
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    client
+        .create_bucket()
+        .bucket("url-plus-test")
+        .send()
+        .await
+        .expect("create bucket");
+    let data: &[u8] = b"plus body";
+    client
+        .put_object()
+        .bucket("url-plus-test")
+        .key("foo+bar")
+        .body(data.to_vec().into())
+        .send()
+        .await
+        .expect("PUT foo+bar");
+    let got = client
+        .get_object()
+        .bucket("url-plus-test")
+        .key("foo+bar")
+        .send()
+        .await
+        .expect("GET foo+bar");
+    let returned = got.body.collect().await.expect("collect").into_bytes();
+    assert_eq!(returned.as_ref(), data);
+}
+
+/// Key `foo bar` stored, retrieved via raw `foo%20bar` URL
+#[tokio::test]
+async fn test_url_encoding_percent20_get() {
+    let (client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+    client
+        .create_bucket()
+        .bucket("url-pct-test")
+        .send()
+        .await
+        .expect("create bucket");
+    let data: &[u8] = b"pct-encoded";
+    client
+        .put_object()
+        .bucket("url-pct-test")
+        .key("foo bar")
+        .body(data.to_vec().into())
+        .send()
+        .await
+        .expect("put");
+    let resp = http
+        .get(format!("{}/url-pct-test/foo%20bar", server.base_url))
+        .send()
+        .await
+        .expect("GET %20");
+    assert_eq!(resp.status(), 200, "GET with %20 should succeed");
+    assert_eq!(resp.bytes().await.expect("bytes").as_ref(), data);
+}
+
+/// ListObjects XML result contains the key with special chars
+#[tokio::test]
+async fn test_url_encoding_list_contains_special_key() {
+    let (client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+    client
+        .create_bucket()
+        .bucket("url-list-enc-test")
+        .send()
+        .await
+        .expect("create bucket");
+    client
+        .put_object()
+        .bucket("url-list-enc-test")
+        .key("foo bar")
+        .body(b"x".to_vec().into())
+        .send()
+        .await
+        .expect("put");
+    let resp = http
+        .get(format!("{}/url-list-enc-test?list-type=2", server.base_url))
+        .send()
+        .await
+        .expect("list");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.expect("text");
+    assert!(
+        body.contains("foo") && body.contains("bar"),
+        "list XML should reference space-key, got: {}",
+        &body[..body.len().min(500)]
     );
 }

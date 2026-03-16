@@ -13,7 +13,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use base64::Engine as _;
 use bytes::Bytes;
+use sha2::Digest;
 use tracing::{debug, info};
 
 /// Put an object
@@ -46,7 +48,7 @@ pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     state.metrics_tracker.record_request();
     let content_type = headers
@@ -54,8 +56,8 @@ pub async fn put_object(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream");
     info!(
-        bucket = % bucket, key = % key, size = % body.len(), content_type = %
-        content_type, "PutObject"
+        bucket = % bucket, key = % key, content_type = %
+        content_type, "PutObject (streaming)"
     );
     match state.storage.bucket_exists(&bucket).await {
         Ok(false) => {
@@ -77,9 +79,104 @@ pub async fn put_object(
             }
         }
     }
-    if let Some(model_format) = crate::storage::ml_models::detect_ml_model_format(&body).await {
+
+    // Parse checksum headers and store under reserved keys
+    const CHECKSUM_HEADERS: &[(&str, &str)] = &[
+        ("x-amz-checksum-sha256", "sha256"),
+        ("x-amz-checksum-crc32", "crc32"),
+        ("x-amz-checksum-crc32c", "crc32c"),
+        ("x-amz-checksum-sha1", "sha1"),
+    ];
+    for (header_name, algo_name) in CHECKSUM_HEADERS {
+        if let Some(hv) = headers.get(*header_name) {
+            match hv.to_str() {
+                Ok(raw) => {
+                    // Validate that the value is valid base64
+                    if base64::engine::general_purpose::STANDARD
+                        .decode(raw)
+                        .is_err()
+                        && base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .decode(raw)
+                            .is_err()
+                    {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidRequest",
+                            "Checksum value is not valid base64",
+                            &format!("/{}/{}", bucket, key),
+                        );
+                    }
+                    metadata.insert("__checksum_algo__".to_string(), algo_name.to_string());
+                    metadata.insert("__checksum_value__".to_string(), raw.to_string());
+                }
+                Err(_) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidRequest",
+                        "Checksum header value is not valid UTF-8",
+                        &format!("/{}/{}", bucket, key),
+                    );
+                }
+            }
+            // Only the first matching checksum header is used
+            break;
+        }
+    }
+
+    // Persist caching / content headers under reserved keys
+    const SYS_HEADERS: &[(&str, &str)] = &[
+        ("content-disposition", "__sys_content_disposition__"),
+        ("cache-control", "__sys_cache_control__"),
+        ("expires", "__sys_expires__"),
+        ("content-encoding", "__sys_content_encoding__"),
+    ];
+    for (header_name, reserved_key) in SYS_HEADERS {
+        if let Some(hv) = headers.get(*header_name) {
+            if let Ok(v) = hv.to_str() {
+                metadata.insert(reserved_key.to_string(), v.to_string());
+            }
+        }
+    }
+
+    // Stream the body incrementally: collect chunks while computing SHA-256
+    // and MD5 hashes, then pass the data through to the storage engine.
+    let mut sha256_hasher = sha2::Sha256::new();
+    let mut md5_hasher = md5::Context::new();
+    let mut body_data: Vec<u8> = Vec::new();
+
+    let mut body_stream = body.into_data_stream();
+    use futures::StreamExt;
+    while let Some(chunk_result) = body_stream.next().await {
+        match chunk_result {
+            Ok(chunk) => {
+                sha256_hasher.update(&chunk);
+                md5_hasher.consume(&chunk);
+                body_data.extend_from_slice(&chunk);
+            }
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    &format!("Failed to read request body: {}", e),
+                    &format!("/{}/{}", bucket, key),
+                );
+            }
+        }
+    }
+
+    let sha256_hex = format!("{:x}", sha256_hasher.finalize());
+    let _md5_digest = md5_hasher.finalize();
+    let body_bytes = Bytes::from(body_data);
+
+    info!(
+        bucket = % bucket, key = % key, size = % body_bytes.len(),
+        "PutObject body received"
+    );
+
+    if let Some(model_format) = crate::storage::ml_models::detect_ml_model_format(&body_bytes).await
+    {
         if let Some(model_metadata) =
-            crate::storage::ml_models::extract_ml_metadata(model_format, &body).await
+            crate::storage::ml_models::extract_ml_metadata(model_format, &body_bytes).await
         {
             let ml_headers = model_metadata.to_headers();
             for (header_key, header_value) in ml_headers {
@@ -95,10 +192,55 @@ pub async fn put_object(
             );
         }
     }
-    let body_size = body.len() as u64;
+    let body_size = body_bytes.len() as u64;
+
+    // Write to a temp file and use put_object_from_path for atomic rename
+    let tmp_dir = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = tmp_dir.join(format!("rs3gw-put-{}-{}.tmp", uuid::Uuid::new_v4(), nanos));
+
+    // Write data to temp file
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut tmp_file = match tokio::fs::File::create(&tmp_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                return storage_error_to_response(
+                    crate::storage::StorageError::from(e),
+                    &format!("/{}/{}", bucket, key),
+                );
+            }
+        };
+        if let Err(e) = tmp_file.write_all(&body_bytes).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return storage_error_to_response(
+                crate::storage::StorageError::from(e),
+                &format!("/{}/{}", bucket, key),
+            );
+        }
+        if let Err(e) = tmp_file.flush().await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return storage_error_to_response(
+                crate::storage::StorageError::from(e),
+                &format!("/{}/{}", bucket, key),
+            );
+        }
+    }
+
     match state
         .storage
-        .put_object(&bucket, &key, content_type, metadata, body)
+        .put_object_from_path(
+            &bucket,
+            &key,
+            Some(content_type.to_string()),
+            metadata,
+            &tmp_path,
+            body_size,
+            sha256_hex,
+        )
         .await
     {
         Ok(etag) => {
@@ -122,7 +264,10 @@ pub async fn put_object(
                 )
             })
         }
-        Err(e) => storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            storage_error_to_response(e, &format!("/{}/{}", bucket, key))
+        }
     }
 }
 /// POST object (browser-based upload using multipart/form-data)
@@ -358,7 +503,28 @@ pub(super) fn build_object_headers_with_sci(
         .header("x-amz-version-id", "null")
         .header("x-amz-request-id", uuid::Uuid::new_v4().to_string());
     for (k, v) in &meta.metadata {
-        builder = builder.header(format!("x-amz-meta-{}", k), v);
+        if !k.starts_with("__sys_") && !k.starts_with("__checksum_") {
+            builder = builder.header(format!("x-amz-meta-{}", k), v);
+        }
+    }
+    // Emit stored checksum header
+    if let (Some(algo), Some(value)) = (
+        meta.metadata.get("__checksum_algo__"),
+        meta.metadata.get("__checksum_value__"),
+    ) {
+        builder = builder.header(format!("x-amz-checksum-{}", algo), value);
+    }
+    // Emit stored caching/content headers
+    const SYS_RESPONSE_HEADERS: &[(&str, &str)] = &[
+        ("__sys_content_disposition__", "Content-Disposition"),
+        ("__sys_cache_control__", "Cache-Control"),
+        ("__sys_expires__", "Expires"),
+        ("__sys_content_encoding__", "Content-Encoding"),
+    ];
+    for (reserved_key, response_header) in SYS_RESPONSE_HEADERS {
+        if let Some(v) = meta.metadata.get(*reserved_key) {
+            builder = builder.header(*response_header, v);
+        }
     }
     if let Some(sci) = sci_meta {
         for (k, v) in sci.to_s3_metadata() {

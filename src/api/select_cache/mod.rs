@@ -30,171 +30,22 @@
 //! cache.put("SELECT * FROM s3object", "etag123", result.clone(), 3600).await;
 //! ```
 
+mod entry;
+mod pattern;
+mod persistence;
+mod stats;
+
+pub use pattern::QueryPattern;
+pub use stats::CacheStats;
+
 use bytes::Bytes;
+use entry::CacheEntry;
 use metrics::{counter, gauge};
-use serde::{Deserialize, Serialize};
+use persistence::PersistentCacheState;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-
-/// Query pattern tracking for cache warming
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryPattern {
-    /// SQL expression
-    pub sql: String,
-
-    /// Object bucket and key
-    pub bucket: String,
-    pub key: String,
-
-    /// Number of times this query has been executed
-    pub execution_count: u64,
-
-    /// Last execution timestamp
-    pub last_executed: i64,
-
-    /// Average execution time in milliseconds
-    pub avg_execution_ms: u64,
-}
-
-/// Cache statistics
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CacheStats {
-    /// Total number of cache get requests
-    pub gets: u64,
-
-    /// Number of cache hits
-    pub hits: u64,
-
-    /// Number of cache misses
-    pub misses: u64,
-
-    /// Number of entries evicted due to LRU
-    pub evictions: u64,
-
-    /// Number of entries expired due to TTL
-    pub expirations: u64,
-
-    /// Current number of cached entries
-    pub current_entries: usize,
-
-    /// Current estimated memory usage in bytes
-    pub memory_bytes: u64,
-
-    /// Maximum allowed entries
-    pub max_entries: usize,
-
-    /// Maximum allowed memory in bytes
-    pub max_memory_bytes: u64,
-}
-
-impl CacheStats {
-    /// Calculate hit rate as a percentage
-    pub fn hit_rate(&self) -> f64 {
-        if self.gets == 0 {
-            0.0
-        } else {
-            (self.hits as f64 / self.gets as f64) * 100.0
-        }
-    }
-
-    /// Calculate memory utilization percentage
-    pub fn memory_utilization(&self) -> f64 {
-        if self.max_memory_bytes == 0 {
-            0.0
-        } else {
-            (self.memory_bytes as f64 / self.max_memory_bytes as f64) * 100.0
-        }
-    }
-}
-
-/// Cached query result entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CacheEntry {
-    /// Query result data
-    #[serde(with = "serde_bytes_helper")]
-    result: Bytes,
-
-    /// Object ETag when this result was cached
-    etag: String,
-
-    /// Timestamp when this entry was created (Unix timestamp)
-    created_at: i64,
-
-    /// Time-to-live in seconds (0 = no expiration)
-    ttl_seconds: u64,
-
-    /// Last access timestamp (for LRU)
-    last_accessed: i64,
-
-    /// Estimated size in bytes
-    size_bytes: usize,
-}
-
-/// Helper module for serializing/deserializing Bytes
-mod serde_bytes_helper {
-    use bytes::Bytes;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(bytes.as_ref())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let vec: Vec<u8> = Vec::deserialize(deserializer)?;
-        Ok(Bytes::from(vec))
-    }
-}
-
-/// Persistent cache state for saving to disk
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistentCacheState {
-    /// Cache entries (query_key -> entry)
-    cache: HashMap<String, CacheEntry>,
-
-    /// Query patterns (pattern_key -> pattern)
-    query_patterns: HashMap<String, QueryPattern>,
-
-    /// Cache statistics
-    stats: CacheStats,
-
-    /// Version for future compatibility
-    version: u32,
-
-    /// Timestamp when saved
-    saved_at: i64,
-}
-
-impl CacheEntry {
-    /// Check if entry is expired
-    fn is_expired(&self) -> bool {
-        if self.ttl_seconds == 0 {
-            return false;
-        }
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        now - self.created_at > self.ttl_seconds as i64
-    }
-
-    /// Update last accessed timestamp
-    fn touch(&mut self) {
-        self.last_accessed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-    }
-}
 
 /// S3 Select query result cache
 pub struct SelectResultCache {
@@ -275,6 +126,7 @@ impl SelectResultCache {
                 counter!("select_cache_expirations").increment(1);
                 counter!("select_cache_misses").increment(1);
                 gauge!("select_cache_entries").set(cache.len() as f64);
+                crate::metrics::record_cache_operation("select_cache", false);
 
                 return None;
             }
@@ -288,6 +140,7 @@ impl SelectResultCache {
                 // Record metrics
                 counter!("select_cache_misses").increment(1);
                 gauge!("select_cache_entries").set(cache.len() as f64);
+                crate::metrics::record_cache_operation("select_cache", false);
 
                 return None;
             }
@@ -298,6 +151,7 @@ impl SelectResultCache {
 
             // Record metrics
             counter!("select_cache_hits").increment(1);
+            crate::metrics::record_cache_operation("select_cache", true);
 
             Some(entry.result.clone())
         } else {
@@ -305,6 +159,7 @@ impl SelectResultCache {
 
             // Record metrics
             counter!("select_cache_misses").increment(1);
+            crate::metrics::record_cache_operation("select_cache", false);
 
             None
         }

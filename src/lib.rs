@@ -10,9 +10,12 @@ pub mod metrics;
 pub mod observability;
 pub mod storage;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::api::{EventBroadcaster, ThrottleConfig, ThrottleManager};
 use crate::cluster::{
@@ -144,6 +147,13 @@ pub struct Config {
     /// S3 Select cache configuration
     #[serde(default)]
     pub select_cache: SelectCacheConfig,
+    /// Hours before abandoned multipart uploads are garbage collected (default: 168 = 7 days)
+    #[serde(default = "default_multipart_retention_hours")]
+    pub multipart_retention_hours: u64,
+    /// When true, call sync_all() on object files before rename. Safer but slower.
+    /// Set via RS3GW_FSYNC=true env var. Default: false.
+    #[serde(default)]
+    pub fsync: bool,
 }
 
 /// S3 Select query result cache configuration
@@ -202,6 +212,10 @@ fn default_bucket_name() -> String {
     "default".to_string()
 }
 
+fn default_multipart_retention_hours() -> u64 {
+    168
+}
+
 fn default_request_timeout() -> u64 {
     300
 }
@@ -223,6 +237,8 @@ impl Default for Config {
             dedup: DedupConfig::default(),
             zerocopy: ZeroCopyConfig::default(),
             select_cache: SelectCacheConfig::default(),
+            multipart_retention_hours: 168,
+            fsync: false,
         }
     }
 }
@@ -442,6 +458,13 @@ impl Config {
             dedup,
             zerocopy,
             select_cache,
+            multipart_retention_hours: std::env::var("RS3GW_MULTIPART_RETENTION_HOURS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(168),
+            fsync: std::env::var("RS3GW_FSYNC")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
         }
     }
 
@@ -524,12 +547,23 @@ impl Config {
             }
         }
 
+        if let Ok(retention) = std::env::var("RS3GW_MULTIPART_RETENTION_HOURS") {
+            if let Ok(hours) = retention.parse() {
+                config.multipart_retention_hours = hours;
+            }
+        }
+
         // TLS overrides
         if let Ok(cert_path) = std::env::var("RS3GW_TLS_CERT") {
             config.tls.cert_path = Some(PathBuf::from(cert_path));
         }
         if let Ok(key_path) = std::env::var("RS3GW_TLS_KEY") {
             config.tls.key_path = Some(PathBuf::from(key_path));
+        }
+
+        // fsync override
+        if let Ok(fsync_val) = std::env::var("RS3GW_FSYNC") {
+            config.fsync = fsync_val == "true" || fsync_val == "1";
         }
 
         config
@@ -684,6 +718,75 @@ impl QuotaSettings {
     }
 }
 
+/// Tracks in-flight requests for graceful shutdown drain
+#[derive(Clone)]
+pub struct InFlightTracker {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl InFlightTracker {
+    pub fn new() -> Self {
+        Self {
+            count: Arc::new(AtomicUsize::new(0)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    pub fn track_start(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn track_end(&self) {
+        let prev = self.count.fetch_sub(1, Ordering::SeqCst);
+        if prev == 1 {
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait_drain(&self, timeout: Duration) {
+        if self.active_count() == 0 {
+            return;
+        }
+        let _ = tokio::time::timeout(timeout, async {
+            while self.active_count() > 0 {
+                self.notify.notified().await;
+            }
+        })
+        .await;
+    }
+}
+
+impl Default for InFlightTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RAII guard that tracks an in-flight request lifetime
+pub struct InFlightGuard {
+    tracker: InFlightTracker,
+}
+
+impl InFlightGuard {
+    pub fn new(tracker: &InFlightTracker) -> Self {
+        tracker.track_start();
+        Self {
+            tracker: tracker.clone(),
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.tracker.track_end();
+    }
+}
+
 /// Application state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -703,6 +806,13 @@ pub struct AppState {
     pub metrics_tracker: Arc<observability::MetricsTracker>,
     pub training_manager: Arc<storage::TrainingManager>,
     pub start_time: std::time::Instant,
+    /// Optional SigV4 verifier — None means auth is disabled (passthrough mode)
+    pub verifier: Option<Arc<crate::auth::v4::SigV4Verifier>>,
+    /// Auth failure rate limiter: IP -> (failure_count, window_start)
+    pub auth_failure_counts:
+        Arc<std::sync::Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
+    /// Tracks in-flight requests for graceful shutdown drain
+    pub in_flight: InFlightTracker,
 }
 
 impl AppState {
@@ -768,6 +878,18 @@ impl AppState {
         // Initialize query intelligence for AI-powered query optimization
         let query_intelligence = Arc::new(api::QueryIntelligence::new());
 
+        // Initialize SigV4 verifier if credentials are configured
+        let region = std::env::var("RS3GW_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+        let verifier = if !config.access_key.is_empty() && !config.secret_key.is_empty() {
+            Some(Arc::new(crate::auth::v4::SigV4Verifier::new(
+                config.access_key.clone(),
+                config.secret_key.clone(),
+                region,
+            )))
+        } else {
+            None
+        };
+
         Self {
             config,
             storage,
@@ -785,6 +907,9 @@ impl AppState {
             metrics_tracker,
             training_manager,
             start_time: std::time::Instant::now(),
+            verifier,
+            auth_failure_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            in_flight: InFlightTracker::new(),
         }
     }
 

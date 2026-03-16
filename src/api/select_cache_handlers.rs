@@ -268,17 +268,20 @@ pub async fn save_cache(
 
     // Get current stats before save
     let cache_stats = state.select_result_cache.stats().await;
-    let pattern_stats = state.select_result_cache.pattern_stats().await;
+    let pattern_stats: std::collections::HashMap<String, serde_json::Value> =
+        state.select_result_cache.pattern_stats().await;
 
     // Save cache
     state
         .select_result_cache
         .save_to_file(&cache_path)
         .await
-        .map_err(|e| ErrorResponse {
-            error: "Failed to save cache".to_string(),
-            details: Some(e.to_string()),
-        })?;
+        .map_err(
+            |e: Box<dyn std::error::Error + Send + Sync>| ErrorResponse {
+                error: "Failed to save cache".to_string(),
+                details: Some(e.to_string()),
+            },
+        )?;
 
     Ok(Json(CacheSaveResponse {
         status: "success".to_string(),
@@ -286,7 +289,7 @@ pub async fn save_cache(
         entries_saved: cache_stats.current_entries,
         patterns_saved: pattern_stats
             .get("total_patterns")
-            .and_then(|v| v.as_u64())
+            .and_then(|v: &serde_json::Value| v.as_u64())
             .unwrap_or(0) as usize,
     }))
 }
@@ -318,14 +321,17 @@ pub async fn load_cache(
         .select_result_cache
         .load_from_file(&cache_path)
         .await
-        .map_err(|e| ErrorResponse {
-            error: "Failed to load cache".to_string(),
-            details: Some(e.to_string()),
-        })?;
+        .map_err(
+            |e: Box<dyn std::error::Error + Send + Sync>| ErrorResponse {
+                error: "Failed to load cache".to_string(),
+                details: Some(e.to_string()),
+            },
+        )?;
 
     // Get stats after load
     let stats_after = state.select_result_cache.stats().await;
-    let pattern_stats = state.select_result_cache.pattern_stats().await;
+    let pattern_stats: std::collections::HashMap<String, serde_json::Value> =
+        state.select_result_cache.pattern_stats().await;
 
     let entries_expired = (stats_after.expirations - stats_before.expirations) as usize;
 
@@ -336,7 +342,7 @@ pub async fn load_cache(
         entries_expired,
         patterns_loaded: pattern_stats
             .get("total_patterns")
-            .and_then(|v| v.as_u64())
+            .and_then(|v: &serde_json::Value| v.as_u64())
             .unwrap_or(0) as usize,
     }))
 }

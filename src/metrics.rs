@@ -6,34 +6,99 @@ use std::sync::{Mutex, Once};
 use std::time::Instant;
 
 use axum::{body::Body, extract::Request, http::Method, middleware::Next, response::Response};
-use metrics::{counter, gauge, histogram};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics::Unit;
+use metrics::{counter, describe_histogram, gauge, histogram};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 
 /// Global metrics initialization state
 static METRICS_INIT: Once = Once::new();
 static METRICS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
+
+/// Histogram bucket boundaries for request duration (ms)
+///
+/// Buckets: 0.1ms, 1ms, 5ms, 10ms, 50ms, 100ms, 500ms, 1s, 5s, 60s
+const REQUEST_DURATION_BUCKETS: &[f64] = &[
+    0.1, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 60000.0,
+];
+
+/// Histogram bucket boundaries for object sizes (bytes)
+///
+/// Buckets: 1KB, 64KB, 1MB, 10MB, 100MB, 1GB
+const OBJECT_SIZE_BUCKETS: &[f64] = &[
+    1024.0,
+    65536.0,
+    1_048_576.0,
+    10_485_760.0,
+    104_857_600.0,
+    1_073_741_824.0,
+];
+
+/// Histogram bucket boundaries for dedup savings ratio (0.0 – 1.0)
+const DEDUP_SAVINGS_RATIO_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
+
+/// Histogram bucket boundaries for compression ratio (compressed/original, 0.0 – 1.0+)
+const COMPRESSION_RATIO_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.25];
+
+/// Build a `PrometheusBuilder` pre-configured with explicit histogram bucket boundaries.
+///
+/// Centralises bucket configuration so both `init_metrics` and
+/// `configure_histogram_buckets` (used in tests) share the same settings.
+pub fn build_prometheus_builder() -> Result<PrometheusBuilder, Box<dyn std::error::Error>> {
+    let builder = PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Full("rs3gw_request_duration_ms".to_string()),
+            REQUEST_DURATION_BUCKETS,
+        )
+        .map_err(|e| format!("Failed to set request_duration_ms buckets: {e}"))?
+        .set_buckets_for_metric(
+            Matcher::Full("rs3gw_object_size_bytes".to_string()),
+            OBJECT_SIZE_BUCKETS,
+        )
+        .map_err(|e| format!("Failed to set object_size_bytes buckets: {e}"))?
+        .set_buckets_for_metric(
+            Matcher::Full("rs3gw_dedup_savings_ratio".to_string()),
+            DEDUP_SAVINGS_RATIO_BUCKETS,
+        )
+        .map_err(|e| format!("Failed to set dedup_savings_ratio buckets: {e}"))?
+        .set_buckets_for_metric(
+            Matcher::Full("rs3gw_compression_ratio".to_string()),
+            COMPRESSION_RATIO_BUCKETS,
+        )
+        .map_err(|e| format!("Failed to set compression_ratio buckets: {e}"))?;
+    Ok(builder)
+}
 
 /// Initialize the Prometheus metrics recorder and return the handle
 ///
 /// This function can be called multiple times safely. It will only initialize
 /// the global metrics recorder once and return a cloned handle on subsequent calls.
 pub fn init_metrics() -> Result<PrometheusHandle, Box<dyn std::error::Error>> {
+    let mut init_error: Option<String> = None;
+
     METRICS_INIT.call_once(|| {
-        match PrometheusBuilder::new().install_recorder() {
-            Ok(handle) => {
-                if let Ok(mut guard) = METRICS_HANDLE.lock() {
-                    *guard = Some(handle);
+        match build_prometheus_builder() {
+            Ok(builder) => match builder.install_recorder() {
+                Ok(handle) => {
+                    if let Ok(mut guard) = METRICS_HANDLE.lock() {
+                        *guard = Some(handle);
+                    }
+                    configure_histogram_buckets();
                 }
-            }
-            Err(_) => {
-                // Metrics recorder already installed by another caller
-                // Try to create a new builder to get a handle to the existing recorder
-                // This will fail to install but that's OK - we just need a handle
-                // Note: metrics-exporter-prometheus doesn't provide a way to get the existing handle
-                // so we can't populate METRICS_HANDLE in this case
+                Err(_) => {
+                    // Metrics recorder already installed by another caller.
+                    // The existing global recorder will be used; we cannot
+                    // retrieve its handle here.
+                }
+            },
+            Err(e) => {
+                init_error = Some(e.to_string());
             }
         }
     });
+
+    if let Some(e) = init_error {
+        return Err(e.into());
+    }
 
     // Return a cloned handle
     METRICS_HANDLE
@@ -48,6 +113,41 @@ pub fn init_metrics() -> Result<PrometheusHandle, Box<dyn std::error::Error>> {
                      This usually means metrics were already initialized elsewhere and the handle was not saved.".into()
                 })
         })
+}
+
+/// Configure histogram bucket documentation via `describe_histogram!`.
+///
+/// This is automatically called at the end of `init_metrics()`.  It can also
+/// be called standalone in tests that build their own recorder so that the
+/// description metadata is registered with whatever recorder is currently
+/// installed.
+///
+/// Intended histogram buckets per metric:
+/// - `rs3gw_request_duration_ms`:  [0.1, 1, 5, 10, 50, 100, 500, 1 000, 5 000, 60 000] ms
+/// - `rs3gw_object_size_bytes`:    [1 024, 65 536, 1 048 576, 10 485 760, 104 857 600, 1 073 741 824] bytes
+/// - `rs3gw_dedup_savings_ratio`:  [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
+/// - `rs3gw_compression_ratio`:    [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.25]
+pub fn configure_histogram_buckets() {
+    describe_histogram!(
+        "rs3gw_request_duration_ms",
+        Unit::Milliseconds,
+        "Request latency histogram. Buckets: [0.1, 1, 5, 10, 50, 100, 500, 1000, 5000, 60000] ms"
+    );
+    describe_histogram!(
+        "rs3gw_object_size_bytes",
+        Unit::Bytes,
+        "Object size distribution. Buckets: [1024, 65536, 1048576, 10485760, 104857600, 1073741824] bytes"
+    );
+    describe_histogram!(
+        "rs3gw_dedup_savings_ratio",
+        Unit::Count,
+        "Dedup savings ratio (bytes_saved/original_bytes). Buckets: [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]"
+    );
+    describe_histogram!(
+        "rs3gw_compression_ratio",
+        Unit::Count,
+        "Compression ratio (compressed/original). Buckets: [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.25]"
+    );
 }
 
 /// Metrics middleware layer
@@ -311,4 +411,25 @@ pub fn record_multipart_upload(parts: usize, total_size_bytes: u64, duration_ms:
     histogram!("rs3gw_multipart_parts").record(parts as f64);
     histogram!("rs3gw_multipart_size_bytes").record(total_size_bytes as f64);
     histogram!("rs3gw_multipart_duration_ms").record(duration_ms);
+}
+
+/// Record object size distribution
+///
+/// Intended histogram buckets (bytes):
+/// `[1024, 65536, 1_048_576, 10_485_760, 104_857_600, 1_073_741_824]`
+pub fn record_object_size(bucket: &str, size_bytes: u64) {
+    histogram!("rs3gw_object_size_bytes", "bucket" => bucket.to_string()).record(size_bytes as f64);
+}
+
+/// Record deduplication savings
+///
+/// Increments total bytes saved and operation counters, and records the savings
+/// ratio (`bytes_saved / original_bytes`) in a histogram when `original_bytes > 0`.
+pub fn record_dedup_savings(bytes_saved: u64, original_bytes: u64) {
+    counter!("rs3gw_dedup_total_bytes_saved").increment(bytes_saved);
+    counter!("rs3gw_dedup_operations_total").increment(1);
+    if original_bytes > 0 {
+        let ratio = bytes_saved as f64 / original_bytes as f64;
+        histogram!("rs3gw_dedup_savings_ratio").record(ratio);
+    }
 }

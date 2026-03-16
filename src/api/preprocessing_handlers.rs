@@ -140,7 +140,7 @@ pub async fn list_pipelines(
 ) -> Result<Json<ListPipelinesResponse>, PreprocessingError> {
     tracing::debug!("Listing all preprocessing pipelines");
 
-    let pipelines = state.preprocessing_manager.list_pipelines().await;
+    let pipelines: Vec<PipelineDefinition> = state.preprocessing_manager.list_pipelines().await;
     let count = pipelines.len();
 
     Ok(Json(ListPipelinesResponse { pipelines, count }))
@@ -153,7 +153,7 @@ pub async fn get_pipeline(
 ) -> Result<Json<serde_json::Value>, PreprocessingError> {
     tracing::debug!("Getting preprocessing pipeline: {}", id);
 
-    let pipeline = state.preprocessing_manager.get_pipeline(&id).await?;
+    let pipeline: PipelineDefinition = state.preprocessing_manager.get_pipeline(&id).await?;
 
     Ok(Json(serde_json::json!({
         "pipeline": pipeline,
@@ -199,8 +199,9 @@ pub async fn apply_pipeline(
     // Read the stream into bytes
     let mut data = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|e| PreprocessingError::Io(std::io::Error::other(e.to_string())))?;
+        let chunk: bytes::Bytes = chunk.map_err(|e: crate::storage::StorageError| {
+            PreprocessingError::Io(std::io::Error::other(e.to_string()))
+        })?;
         data.extend_from_slice(&chunk);
     }
     let input_data = bytes::Bytes::from(data);

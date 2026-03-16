@@ -11,6 +11,78 @@ use crate::storage::StorageEngine;
 use super::proto::s3_service_server::{S3Service, S3ServiceServer};
 use super::proto::{bucket, multipart, object};
 
+/// gRPC server configuration loaded from environment variables.
+#[derive(Debug, Clone)]
+pub struct GrpcConfig {
+    /// Whether the gRPC server is enabled (RS3GW_GRPC_ENABLED)
+    pub enabled: bool,
+    /// Address to bind the gRPC server (RS3GW_GRPC_PORT controls port, default 50051)
+    pub bind_addr: SocketAddr,
+    /// Maximum inbound/outbound message size in bytes (RS3GW_GRPC_MAX_MESSAGE_SIZE, default 64MB)
+    pub max_message_size_bytes: usize,
+    /// Path to TLS certificate PEM file (RS3GW_GRPC_TLS_CERT)
+    pub tls_cert_path: Option<std::path::PathBuf>,
+    /// Path to TLS private key PEM file (RS3GW_GRPC_TLS_KEY)
+    pub tls_key_path: Option<std::path::PathBuf>,
+}
+
+impl GrpcConfig {
+    /// Build configuration from environment variables, falling back to defaults.
+    ///
+    /// | Variable                      | Default         |
+    /// |-------------------------------|-----------------|
+    /// | `RS3GW_GRPC_ENABLED`          | `false`         |
+    /// | `RS3GW_GRPC_PORT`             | `50051`         |
+    /// | `RS3GW_GRPC_MAX_MESSAGE_SIZE` | `67108864` (64MB)|
+    /// | `RS3GW_GRPC_TLS_CERT`         | *(none)*        |
+    /// | `RS3GW_GRPC_TLS_KEY`          | *(none)*        |
+    pub fn from_env() -> Self {
+        let enabled = std::env::var("RS3GW_GRPC_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let bind_addr = std::env::var("RS3GW_GRPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .map(|port| {
+                format!("0.0.0.0:{}", port)
+                    .parse()
+                    .unwrap_or_else(|_| "0.0.0.0:50051".parse().expect("static grpc default addr"))
+            })
+            .unwrap_or_else(|| {
+                "0.0.0.0:50051"
+                    .parse()
+                    .expect("static grpc default addr is valid")
+            });
+
+        let max_message_size_bytes = std::env::var("RS3GW_GRPC_MAX_MESSAGE_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(64 * 1024 * 1024);
+
+        let tls_cert_path = std::env::var("RS3GW_GRPC_TLS_CERT")
+            .ok()
+            .map(std::path::PathBuf::from);
+
+        let tls_key_path = std::env::var("RS3GW_GRPC_TLS_KEY")
+            .ok()
+            .map(std::path::PathBuf::from);
+
+        Self {
+            enabled,
+            bind_addr,
+            max_message_size_bytes,
+            tls_cert_path,
+            tls_key_path,
+        }
+    }
+
+    /// Returns `true` if both TLS cert and key paths are configured.
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert_path.is_some() && self.tls_key_path.is_some()
+    }
+}
+
 /// gRPC service implementation for S3 operations
 #[derive(Clone)]
 pub struct S3ServiceImpl {
@@ -424,20 +496,94 @@ pub struct GrpcServer {
 }
 
 impl GrpcServer {
+    /// Create a new `GrpcServer` bound to `bind_addr`.
     pub fn new(storage: Arc<StorageEngine>, bind_addr: SocketAddr) -> Self {
         Self { storage, bind_addr }
     }
 
+    /// Start the server without TLS (plain HTTP/2) using the stored bind address.
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let service = S3ServiceImpl::new(self.storage);
+        let config = GrpcConfig {
+            enabled: true,
+            bind_addr: self.bind_addr,
+            max_message_size_bytes: 64 * 1024 * 1024,
+            tls_cert_path: None,
+            tls_key_path: None,
+        };
+        Self::serve_impl(self.storage, config).await
+    }
 
-        info!("Starting gRPC server on {}", self.bind_addr);
+    /// Start the server using settings from a [`GrpcConfig`].
+    ///
+    /// When both `tls_cert_path` and `tls_key_path` are set the server will
+    /// terminate TLS; otherwise it runs as plain HTTP/2.
+    pub async fn serve_with_config(
+        self,
+        config: GrpcConfig,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Self::serve_impl(self.storage, config).await
+    }
 
-        Server::builder()
-            .add_service(S3ServiceServer::new(service))
-            .serve(self.bind_addr)
-            .await?;
+    // Internal implementation shared by both public entry points.
+    async fn serve_impl(
+        storage: Arc<StorageEngine>,
+        config: GrpcConfig,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let service = S3ServiceImpl::new(storage);
+        let svc = S3ServiceServer::new(service)
+            .max_decoding_message_size(config.max_message_size_bytes)
+            .max_encoding_message_size(config.max_message_size_bytes);
 
-        Ok(())
+        if config.tls_enabled() {
+            // Both paths are guaranteed Some by tls_enabled().
+            let cert_path = config
+                .tls_cert_path
+                .as_ref()
+                .expect("tls_cert_path is Some when tls_enabled");
+            let key_path = config
+                .tls_key_path
+                .as_ref()
+                .expect("tls_key_path is Some when tls_enabled");
+
+            let cert = tokio::fs::read(cert_path).await.map_err(|e| {
+                format!(
+                    "Failed to read gRPC TLS cert '{}': {}",
+                    cert_path.display(),
+                    e
+                )
+            })?;
+            let key = tokio::fs::read(key_path).await.map_err(|e| {
+                format!(
+                    "Failed to read gRPC TLS key '{}': {}",
+                    key_path.display(),
+                    e
+                )
+            })?;
+
+            let identity = tonic::transport::Identity::from_pem(cert, key);
+            let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
+
+            info!(
+                "Starting gRPC server with TLS on {} (cert: {})",
+                config.bind_addr,
+                cert_path.display()
+            );
+
+            Server::builder()
+                .tls_config(tls_config)
+                .map_err(|e| format!("Failed to configure gRPC TLS: {}", e))?
+                .add_service(svc)
+                .serve(config.bind_addr)
+                .await
+                .map_err(|e| format!("gRPC TLS server error: {}", e).into())
+        } else {
+            info!("Starting gRPC server on {}", config.bind_addr);
+
+            Server::builder()
+                .add_service(svc)
+                .serve(config.bind_addr)
+                .await
+                .map_err(|e| format!("gRPC server error: {}", e).into())
+        }
     }
 }

@@ -643,6 +643,9 @@ mod tests {
             metrics_tracker,
             training_manager: Arc::new(TrainingManager::new(temp_dir.join("training"))),
             start_time: std::time::Instant::now(),
+            verifier: None,
+            auth_failure_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            in_flight: crate::InFlightTracker::new(),
         }
     }
 
