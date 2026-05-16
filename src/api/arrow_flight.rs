@@ -646,6 +646,9 @@ mod tests {
             verifier: None,
             auth_failure_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             in_flight: crate::InFlightTracker::new(),
+            encryption: Arc::new(crate::storage::encryption::EncryptionService::new(
+                Arc::new(crate::storage::encryption::LocalKeyProvider::default()),
+            )),
         }
     }
 

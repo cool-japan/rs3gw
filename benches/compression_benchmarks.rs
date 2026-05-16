@@ -11,6 +11,21 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
+/// Encode data with size-prepended LZ4 block format (4-byte LE original size + raw block).
+fn lz4_compress_prepend_size(data: &[u8]) -> Vec<u8> {
+    let compressed = oxiarc_lz4::compress_block(data).expect("Failed to compress");
+    let mut v = Vec::with_capacity(4 + compressed.len());
+    v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    v.extend_from_slice(&compressed);
+    v
+}
+
+/// Decode data with size-prepended LZ4 block format (4-byte LE original size + raw block).
+fn lz4_decompress_size_prepended(data: &[u8]) -> Vec<u8> {
+    let orig_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    oxiarc_lz4::decompress_block(&data[4..], orig_size).expect("Failed to decompress")
+}
+
 /// Generate test data with varying entropy
 fn generate_test_data(size: usize, entropy: f32) -> Vec<u8> {
     use scirs2_core::random::quick::random_f64;
@@ -41,7 +56,7 @@ fn bench_zstd_compression(c: &mut Criterion) {
                 &(*size, *level),
                 |b, _| {
                     b.iter(|| {
-                        let compressed = zstd::encode_all(black_box(&data[..]), *level)
+                        let compressed = oxiarc_zstd::encode_all(black_box(&data[..]), *level)
                             .expect("Failed to compress");
                         black_box(compressed);
                     });
@@ -59,7 +74,7 @@ fn bench_zstd_decompression(c: &mut Criterion) {
 
     for size in [1024, 10_240, 102_400, 1_048_576].iter() {
         let data = generate_test_data(*size, 0.3);
-        let compressed = zstd::encode_all(&data[..], 3).expect("Failed to compress");
+        let compressed = oxiarc_zstd::encode_all(&data[..], 3).expect("Failed to compress");
 
         group.throughput(Throughput::Bytes(*size as u64));
 
@@ -68,7 +83,7 @@ fn bench_zstd_decompression(c: &mut Criterion) {
             &compressed,
             |b, compressed_data| {
                 b.iter(|| {
-                    let decompressed = zstd::decode_all(black_box(&compressed_data[..]))
+                    let decompressed = oxiarc_zstd::decode_all(black_box(&compressed_data[..]))
                         .expect("Failed to decompress");
                     black_box(decompressed);
                 });
@@ -89,7 +104,7 @@ fn bench_lz4_compression(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, data| {
             b.iter(|| {
-                let compressed = lz4_flex::compress_prepend_size(black_box(data));
+                let compressed = lz4_compress_prepend_size(black_box(data));
                 black_box(compressed);
             });
         });
@@ -104,7 +119,7 @@ fn bench_lz4_decompression(c: &mut Criterion) {
 
     for size in [1024, 10_240, 102_400, 1_048_576].iter() {
         let data = generate_test_data(*size, 0.3);
-        let compressed = lz4_flex::compress_prepend_size(&data);
+        let compressed = lz4_compress_prepend_size(&data);
 
         group.throughput(Throughput::Bytes(*size as u64));
 
@@ -114,8 +129,7 @@ fn bench_lz4_decompression(c: &mut Criterion) {
             |b, compressed_data| {
                 b.iter(|| {
                     let decompressed =
-                        lz4_flex::decompress_size_prepended(black_box(compressed_data))
-                            .expect("Failed to decompress");
+                        lz4_decompress_size_prepended(black_box(compressed_data));
                     black_box(decompressed);
                 });
             },
@@ -141,7 +155,7 @@ fn bench_compression_ratio(c: &mut Criterion) {
             |b, data| {
                 b.iter(|| {
                     let compressed =
-                        zstd::encode_all(black_box(&data[..]), 3).expect("Failed to compress");
+                        oxiarc_zstd::encode_all(black_box(&data[..]), 3).expect("Failed to compress");
                     black_box(compressed);
                 });
             },
@@ -153,7 +167,7 @@ fn bench_compression_ratio(c: &mut Criterion) {
             &data,
             |b, data| {
                 b.iter(|| {
-                    let compressed = lz4_flex::compress_prepend_size(black_box(data));
+                    let compressed = lz4_compress_prepend_size(black_box(data));
                     black_box(compressed);
                 });
             },
@@ -185,14 +199,14 @@ fn bench_compression_threshold(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("zstd_level1", size), &data, |b, data| {
             b.iter(|| {
                 let compressed =
-                    zstd::encode_all(black_box(&data[..]), 1).expect("Failed to compress");
+                    oxiarc_zstd::encode_all(black_box(&data[..]), 1).expect("Failed to compress");
                 black_box(compressed);
             });
         });
 
         group.bench_with_input(BenchmarkId::new("lz4", size), &data, |b, data| {
             b.iter(|| {
-                let compressed = lz4_flex::compress_prepend_size(black_box(data));
+                let compressed = lz4_compress_prepend_size(black_box(data));
                 black_box(compressed);
             });
         });

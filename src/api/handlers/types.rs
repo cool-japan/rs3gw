@@ -85,6 +85,8 @@ pub struct ListObjectVersionsQuery {
     pub max_keys: Option<usize>,
     #[serde(default, rename = "key-marker")]
     pub key_marker: Option<String>,
+    #[serde(default, rename = "version-id-marker")]
+    pub version_id_marker: Option<String>,
 }
 /// Query parameters for presigned URL generation
 #[derive(Debug, Deserialize, Default)]

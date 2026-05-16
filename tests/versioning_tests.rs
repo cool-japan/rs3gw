@@ -108,6 +108,9 @@ async fn setup_versioning_server() -> (aws_sdk_s3::Client, VersioningTestServer)
             std::collections::HashMap::new(),
         )),
         in_flight: rs3gw::InFlightTracker::new(),
+        encryption: std::sync::Arc::new(rs3gw::storage::encryption::EncryptionService::new(
+            std::sync::Arc::new(rs3gw::storage::encryption::LocalKeyProvider::default()),
+        )),
     };
 
     let app = axum::Router::new()

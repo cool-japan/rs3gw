@@ -3,9 +3,11 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::core::storage_error_to_response;
+use crate::api::sse::{format_kms_arn, resolve_sse, SseDecision};
 use crate::api::utils::error_response;
 use crate::api::websocket::{S3Event, S3EventType};
 use crate::storage::ObjectMetadata;
+use crate::storage::ObjectSseSidecar;
 use crate::AppState;
 use axum::{
     body::Body,
@@ -164,7 +166,7 @@ pub async fn put_object(
         }
     }
 
-    let sha256_hex = format!("{:x}", sha256_hasher.finalize());
+    let sha256_hex = hex::encode(sha256_hasher.finalize());
     let _md5_digest = md5_hasher.finalize();
     let body_bytes = Bytes::from(body_data);
 
@@ -192,7 +194,100 @@ pub async fn put_object(
             );
         }
     }
-    let body_size = body_bytes.len() as u64;
+
+    // Resolve SSE decision (per-request header or bucket-default).
+    // sha256_hex is computed over plaintext above — correct per S3 spec (ETag = hash of plaintext).
+    let sse_decision = match resolve_sse(&state, &bucket, &headers).await {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+
+    // Encrypt if SSE requested — write_bytes is what goes on disk.
+    let (write_bytes, sse_sidecar_opt) = match &sse_decision {
+        SseDecision::None => (body_bytes.clone(), None),
+        SseDecision::Aes256 => {
+            let aad = format!("{}/{}", bucket, key);
+            match state
+                .encryption
+                .encrypt_chunked(body_bytes.as_ref(), Some(aad.as_bytes()))
+                .await
+            {
+                Ok(enc) => {
+                    let sidecar = ObjectSseSidecar::from_encrypted(&enc, &bucket, &key);
+                    // Stamp SSE algorithm into reserved metadata so HeadObject can answer fast
+                    metadata.insert("__sse_algorithm__".to_string(), "AES256".to_string());
+                    (Bytes::from(enc.ciphertext), Some(sidecar))
+                }
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        &format!("Encryption failed: {}", e),
+                        &format!("/{}/{}", bucket, key),
+                    );
+                }
+            }
+        }
+        SseDecision::SseC {
+            key: customer_key,
+            key_md5,
+        } => {
+            let aad = format!("{}/{}", bucket, key);
+            match state
+                .encryption
+                .encrypt_with_customer_key(
+                    body_bytes.as_ref(),
+                    customer_key.as_ref(),
+                    Some(aad.as_bytes()),
+                )
+                .await
+            {
+                Ok(enc) => {
+                    let mut sidecar = ObjectSseSidecar::from_encrypted(&enc, &bucket, &key);
+                    sidecar.algorithm = "AES256-SSE-C".to_string();
+                    sidecar.customer_key_md5 = Some(key_md5.to_string());
+                    // Stamp SSE-C algorithm marker so HeadObject/GetObject know the type
+                    metadata.insert("__sse_algorithm__".to_string(), "AES256-SSE-C".to_string());
+                    (Bytes::from(enc.ciphertext), Some(sidecar))
+                }
+                Err(_) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        "SSE-C encryption failed",
+                        &format!("/{}/{}", bucket, key),
+                    );
+                }
+            }
+        }
+        SseDecision::SseKms { key_id } => {
+            let aad = format!("{}/{}", bucket, key);
+            match state
+                .encryption
+                .encrypt_chunked_with_kek_id(body_bytes.as_ref(), key_id, Some(aad.as_bytes()))
+                .await
+            {
+                Ok(enc) => {
+                    let mut sidecar = ObjectSseSidecar::from_encrypted(&enc, &bucket, &key);
+                    sidecar.algorithm = "aws:kms".to_string();
+                    sidecar.kms_master_key_id = Some(format_kms_arn(key_id));
+                    metadata.insert("__sse_algorithm__".to_string(), "aws:kms".to_string());
+                    (Bytes::from(enc.ciphertext), Some(sidecar))
+                }
+                Err(_) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        "SSE-KMS encryption failed",
+                        &format!("/{}/{}", bucket, key),
+                    );
+                }
+            }
+        }
+    };
+
+    // body_size reflects the stored (possibly ciphertext) size
+    let body_size = write_bytes.len() as u64;
 
     // Write to a temp file and use put_object_from_path for atomic rename
     let tmp_dir = std::env::temp_dir();
@@ -202,7 +297,7 @@ pub async fn put_object(
         .as_nanos();
     let tmp_path = tmp_dir.join(format!("rs3gw-put-{}-{}.tmp", uuid::Uuid::new_v4(), nanos));
 
-    // Write data to temp file
+    // Write data (possibly ciphertext) to temp file
     {
         use tokio::io::AsyncWriteExt;
         let mut tmp_file = match tokio::fs::File::create(&tmp_path).await {
@@ -214,7 +309,7 @@ pub async fn put_object(
                 );
             }
         };
-        if let Err(e) = tmp_file.write_all(&body_bytes).await {
+        if let Err(e) = tmp_file.write_all(&write_bytes).await {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return storage_error_to_response(
                 crate::storage::StorageError::from(e),
@@ -244,17 +339,57 @@ pub async fn put_object(
         .await
     {
         Ok(etag) => {
+            // Write SSE sidecar after object is committed (best-effort: a missing sidecar
+            // means a subsequent GET will return ciphertext, but the object is durable).
+            if let Some(sidecar) = sse_sidecar_opt {
+                if let Err(e) = state.storage.put_object_sse(&bucket, &key, &sidecar).await {
+                    tracing::warn!("Failed to write SSE sidecar for {}/{}: {}", bucket, key, e);
+                }
+            }
+
             state.metrics_tracker.record_bytes_uploaded(body_size);
             let event = S3Event::new(S3EventType::ObjectCreated, bucket.clone())
                 .with_key(key.clone())
                 .with_size(body_size)
                 .with_etag(etag.clone());
             state.event_broadcaster.broadcast(event);
-            let response = Response::builder()
+
+            // Fire-and-forget archival for GLACIER / DEEP_ARCHIVE storage class
+            let storage_class = headers
+                .get("x-amz-storage-class")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if matches!(storage_class, "GLACIER" | "DEEP_ARCHIVE") {
+                let _ = state.storage.archive_object(&bucket, &key, body_size).await;
+            }
+
+            let mut response = Response::builder()
                 .status(StatusCode::OK)
                 .header("ETag", format!("\"{}\"", etag))
                 .header("x-amz-version-id", "null")
                 .header("x-amz-request-id", uuid::Uuid::new_v4().to_string());
+            match &sse_decision {
+                SseDecision::Aes256 => {
+                    response = response.header("x-amz-server-side-encryption", "AES256");
+                }
+                SseDecision::SseC { key_md5, .. } => {
+                    response = response
+                        .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+                        .header(
+                            "x-amz-server-side-encryption-customer-key-MD5",
+                            key_md5.as_str(),
+                        );
+                }
+                SseDecision::SseKms { key_id } => {
+                    response = response
+                        .header("x-amz-server-side-encryption", "aws:kms")
+                        .header(
+                            "x-amz-server-side-encryption-aws-kms-key-id",
+                            format_kms_arn(key_id).as_str(),
+                        );
+                }
+                SseDecision::None => {}
+            }
             response.body(Body::empty()).unwrap_or_else(|_| {
                 error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -503,7 +638,7 @@ pub(super) fn build_object_headers_with_sci(
         .header("x-amz-version-id", "null")
         .header("x-amz-request-id", uuid::Uuid::new_v4().to_string());
     for (k, v) in &meta.metadata {
-        if !k.starts_with("__sys_") && !k.starts_with("__checksum_") {
+        if !k.starts_with("__sys_") && !k.starts_with("__checksum_") && !k.starts_with("__sse_") {
             builder = builder.header(format!("x-amz-meta-{}", k), v);
         }
     }
@@ -513,6 +648,30 @@ pub(super) fn build_object_headers_with_sci(
         meta.metadata.get("__checksum_value__"),
     ) {
         builder = builder.header(format!("x-amz-checksum-{}", algo), value);
+    }
+    // Emit SSE algorithm header (HeadObject path).
+    // SSE-C uses different response headers than SSE-S3 and requires the
+    // customer_key_md5 from the sidecar — that is NOT available here because
+    // build_object_headers_with_sci only receives ObjectMetadata.
+    // For SSE-C we emit only the algorithm header here; the head_object handler
+    // is responsible for augmenting with the customer-key-MD5 header from the sidecar.
+    if let Some(algo) = meta.metadata.get("__sse_algorithm__") {
+        match algo.as_str() {
+            "AES256" => {
+                builder = builder.header("x-amz-server-side-encryption", "AES256");
+            }
+            "AES256-SSE-C" => {
+                // Per S3 spec, HeadObject on SSE-C objects returns these headers.
+                // customer-key-MD5 is appended by head_object() after sidecar lookup.
+                builder =
+                    builder.header("x-amz-server-side-encryption-customer-algorithm", "AES256");
+            }
+            "aws:kms" => {
+                // Basic SSE-KMS header; kms-key-id is appended by head_object() after sidecar lookup.
+                builder = builder.header("x-amz-server-side-encryption", "aws:kms");
+            }
+            _ => {}
+        }
     }
     // Emit stored caching/content headers
     const SYS_RESPONSE_HEADERS: &[(&str, &str)] = &[

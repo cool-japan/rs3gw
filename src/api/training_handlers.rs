@@ -533,6 +533,9 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             in_flight: crate::InFlightTracker::new(),
+            encryption: std::sync::Arc::new(crate::storage::encryption::EncryptionService::new(
+                std::sync::Arc::new(crate::storage::encryption::LocalKeyProvider::default()),
+            )),
         }
     }
 

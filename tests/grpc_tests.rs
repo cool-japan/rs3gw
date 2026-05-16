@@ -165,6 +165,9 @@ async fn setup_grpc_test_server() -> (S3ServiceClient<Channel>, TempDir, GrpcTes
             std::collections::HashMap::new(),
         )),
         in_flight: rs3gw::InFlightTracker::new(),
+        encryption: std::sync::Arc::new(rs3gw::storage::encryption::EncryptionService::new(
+            std::sync::Arc::new(rs3gw::storage::encryption::LocalKeyProvider::default()),
+        )),
     };
 
     // Spawn REST server

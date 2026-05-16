@@ -65,77 +65,31 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use tracing::{info, warn};
+use bytes::Bytes;
+use tracing::info;
 
 use crate::AppState;
 
 use super::handlers::storage_error_to_response;
-use super::utils::error_response;
+use super::utils::{
+    error_response, malformed_xml_response, parse_accelerate_xml, parse_analytics_xml,
+    parse_cors_xml, parse_encryption_xml, parse_intelligent_tiering_xml, parse_inventory_xml,
+    parse_legal_hold_xml, parse_lifecycle_xml, parse_logging_xml, parse_metrics_xml,
+    parse_notification_xml, parse_object_lock_configuration_xml, parse_ownership_controls_xml,
+    parse_public_access_block_xml, parse_replication_xml, parse_request_payment_xml,
+    parse_retention_xml, parse_website_xml,
+};
+use super::xml_responses::{
+    AccelerateConfigurationXml, AnalyticsConfigurationXml, BucketLoggingStatusXml,
+    CorsConfigurationXml, IntelligentTieringConfigurationXml, InventoryConfigurationXml,
+    LegalHoldXml, LifecycleConfigurationXml, ListBucketAnalyticsConfigurationsResultXml,
+    ListInventoryConfigurationsResultXml, ListMetricsConfigurationsResultXml,
+    MetricsConfigurationXml, NotificationConfigXml, ObjectLockConfigurationXml,
+    OwnershipControlsXml, PublicAccessBlockConfigurationXml, ReplicationConfigurationXml,
+    RequestPaymentConfigurationXml, RetentionXml, SseConfigurationXml, WebsiteConfigurationXml,
+};
 
-use crate::storage::StorageEngine;
-
-// === Helper functions for common stub patterns ===
-
-/// Helper for bucket delete stubs - returns NO_CONTENT if bucket exists
-async fn delete_stub(storage: &StorageEngine, bucket: &str) -> Response {
-    match storage.bucket_exists(bucket).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => no_such_bucket(bucket),
-        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
-    }
-}
-
-/// Helper for bucket put stubs - returns OK if bucket exists (with warning logged externally)
-async fn put_stub(storage: &StorageEngine, bucket: &str) -> Response {
-    match storage.bucket_exists(bucket).await {
-        Ok(true) => StatusCode::OK.into_response(),
-        Ok(false) => no_such_bucket(bucket),
-        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
-    }
-}
-
-/// Helper for bucket get stubs that return "not found" errors
-async fn get_not_found_stub(
-    storage: &StorageEngine,
-    bucket: &str,
-    error_code: &str,
-    error_msg: &str,
-) -> Response {
-    match storage.bucket_exists(bucket).await {
-        Ok(true) => error_response(
-            StatusCode::NOT_FOUND,
-            error_code,
-            error_msg,
-            &format!("/{}", bucket),
-        ),
-        Ok(false) => no_such_bucket(bucket),
-        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
-    }
-}
-
-/// Helper for bucket get stubs that return XML responses
-async fn get_xml_stub(storage: &StorageEngine, bucket: &str, xml: &str) -> Response {
-    match storage.bucket_exists(bucket).await {
-        Ok(true) => match Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/xml")
-            .body(Body::from(xml.to_string()))
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::error!("Failed to build response: {}", e);
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "InternalError",
-                    "Failed to build response",
-                    &format!("/{}", bucket),
-                )
-            }
-        },
-        Ok(false) => no_such_bucket(bucket),
-        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
-    }
-}
+use crate::storage::{LoggingConfig, RequestPaymentConfig, StorageEngine, StorageError};
 
 /// Standard NoSuchBucket error response
 fn no_such_bucket(bucket: &str) -> Response {
@@ -147,642 +101,1622 @@ fn no_such_bucket(bucket: &str) -> Response {
     )
 }
 
-// === Bucket Encryption Operations (stubs) ===
+// === Bucket Encryption Operations ===
 
-/// Get bucket encryption configuration (stub - returns ServerSideEncryptionConfigurationNotFoundError)
+/// Get bucket encryption configuration
 pub async fn get_bucket_encryption(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketEncryption");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "ServerSideEncryptionConfigurationNotFoundError",
-        "The server side encryption configuration was not found",
-    )
-    .await
+    match state.storage.get_bucket_encryption(&bucket).await {
+        Ok(cfg) => {
+            let xml = SseConfigurationXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::error!("Failed to build response: {}", e);
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        "Failed to build response",
+                        &format!("/{}", bucket),
+                    )
+                }
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "ServerSideEncryptionConfigurationNotFoundError",
+            "The server side encryption configuration was not found",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket encryption configuration (stub - accepts but no-op)
+/// Put bucket encryption configuration
 pub async fn put_bucket_encryption(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketEncryption (stub)");
-    warn!(bucket = %bucket, "Bucket encryption configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketEncryption");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_encryption_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_encryption(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket encryption configuration (stub - no-op)
+/// Delete bucket encryption configuration
 pub async fn delete_bucket_encryption(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketEncryption (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "DeleteBucketEncryption");
+    match state.storage.delete_bucket_encryption(&bucket).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Lifecycle Operations (stubs) ===
+// === Bucket Lifecycle Operations ===
 
-/// Get bucket lifecycle configuration (stub - returns NoSuchLifecycleConfiguration)
 pub async fn get_bucket_lifecycle(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketLifecycleConfiguration");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "NoSuchLifecycleConfiguration",
-        "The lifecycle configuration does not exist",
-    )
-    .await
+    match state.storage.get_bucket_lifecycle(&bucket).await {
+        Ok(cfg) => {
+            let xml = LifecycleConfigurationXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to build response",
+                    &format!("/{}", bucket),
+                ),
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchLifecycleConfiguration",
+            "The lifecycle configuration does not exist",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket lifecycle configuration (stub - accepts but no-op)
 pub async fn put_bucket_lifecycle(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketLifecycleConfiguration (stub)");
-    warn!(bucket = %bucket, "Bucket lifecycle configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketLifecycleConfiguration");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_lifecycle_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_lifecycle(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket lifecycle configuration (stub - no-op)
 pub async fn delete_bucket_lifecycle(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketLifecycleConfiguration (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "DeleteBucketLifecycleConfiguration");
+    match state.storage.delete_bucket_lifecycle(&bucket).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket CORS Operations (stubs) ===
+// === Bucket CORS Operations ===
 
-/// Get bucket CORS configuration (stub - returns NoSuchCORSConfiguration)
+/// Get bucket CORS configuration
 pub async fn get_bucket_cors(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketCors");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "NoSuchCORSConfiguration",
-        "The CORS configuration does not exist",
-    )
-    .await
+    match state.storage.get_bucket_cors(&bucket).await {
+        Ok(cfg) => {
+            let xml = CorsConfigurationXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::error!("Failed to build response: {}", e);
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        "Failed to build response",
+                        &format!("/{}", bucket),
+                    )
+                }
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchCORSConfiguration",
+            "The CORS configuration does not exist",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket CORS configuration (stub - accepts but no-op)
+/// Put bucket CORS configuration
 pub async fn put_bucket_cors(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketCors (stub)");
-    warn!(bucket = %bucket, "Bucket CORS configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketCors");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_cors_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_cors(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket CORS configuration (stub - no-op)
+/// Delete bucket CORS configuration
 pub async fn delete_bucket_cors(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketCors (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "DeleteBucketCors");
+    match state.storage.delete_bucket_cors(&bucket).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Notification Operations (stubs) ===
+// === Bucket Notification Operations ===
 
-const EMPTY_NOTIFICATION_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></NotificationConfiguration>"#;
-
-/// Get bucket notification configuration (stub - returns empty configuration)
+/// Get bucket notification configuration
 pub async fn get_bucket_notification(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketNotificationConfiguration");
-    get_xml_stub(&state.storage, &bucket, EMPTY_NOTIFICATION_XML).await
+    match state.storage.get_bucket_notification(&bucket).await {
+        Ok(cfg) => {
+            let xml = NotificationConfigXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to build response",
+                    &format!("/{}", bucket),
+                ),
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket notification configuration (stub - accepts but no-op)
+/// Put bucket notification configuration
 pub async fn put_bucket_notification(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketNotificationConfiguration (stub)");
-    warn!(bucket = %bucket, "Bucket notification configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketNotificationConfiguration");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_notification_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_notification(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Logging Operations (stubs) ===
+// === Bucket Logging Operations ===
 
-const EMPTY_LOGGING_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<BucketLoggingStatus xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></BucketLoggingStatus>"#;
-
-/// Get bucket logging configuration (stub - returns empty logging config)
 pub async fn get_bucket_logging(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketLogging");
-    get_xml_stub(&state.storage, &bucket, EMPTY_LOGGING_XML).await
+    let cfg = match state.storage.get_bucket_logging(&bucket).await {
+        Ok(c) => c,
+        Err(StorageError::BucketNotFound) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist.",
+                &format!("/{}", bucket),
+            )
+        }
+        Err(StorageError::NotFound(_)) => LoggingConfig {
+            target_bucket: None,
+            target_prefix: None,
+        },
+        Err(e) => return storage_error_to_response(e, &format!("/{}", bucket)),
+    };
+    let xml = BucketLoggingStatusXml::from_config(&cfg).to_xml();
+    match Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/xml")
+        .body(Body::from(xml))
+    {
+        Ok(resp) => resp,
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            "Failed to build response",
+            &format!("/{}", bucket),
+        ),
+    }
 }
 
-/// Put bucket logging configuration (stub - accepts but no-op)
 pub async fn put_bucket_logging(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketLogging (stub)");
-    warn!(bucket = %bucket, "Bucket logging configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketLogging");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_logging_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_logging(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Request Payment Operations (stubs) ===
+// === Bucket Request Payment Operations ===
 
-const REQUEST_PAYMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<RequestPaymentConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-<Payer>BucketOwner</Payer>
-</RequestPaymentConfiguration>"#;
-
-/// Get bucket request payment configuration (stub - returns BucketOwner)
 pub async fn get_bucket_request_payment(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketRequestPayment");
-    get_xml_stub(&state.storage, &bucket, REQUEST_PAYMENT_XML).await
+    let cfg = match state.storage.get_bucket_request_payment(&bucket).await {
+        Ok(c) => c,
+        Err(StorageError::BucketNotFound) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist.",
+                &format!("/{}", bucket),
+            )
+        }
+        Err(StorageError::NotFound(_)) => RequestPaymentConfig {
+            payer: "BucketOwner".to_string(),
+        },
+        Err(e) => return storage_error_to_response(e, &format!("/{}", bucket)),
+    };
+    let xml = RequestPaymentConfigurationXml::from_config(&cfg).to_xml();
+    match Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/xml")
+        .body(Body::from(xml))
+    {
+        Ok(resp) => resp,
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            "Failed to build response",
+            &format!("/{}", bucket),
+        ),
+    }
 }
 
-/// Put bucket request payment configuration (stub - accepts but no-op)
 pub async fn put_bucket_request_payment(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketRequestPayment (stub)");
-    warn!(bucket = %bucket, "Bucket request payment configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketRequestPayment");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_request_payment_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state
+        .storage
+        .put_bucket_request_payment(&bucket, &cfg)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Website Operations (stubs) ===
+// === Bucket Website Operations ===
 
-/// Get bucket website configuration (stub - returns NoSuchWebsiteConfiguration)
 pub async fn get_bucket_website(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketWebsite");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "NoSuchWebsiteConfiguration",
-        "The specified bucket does not have a website configuration",
-    )
-    .await
+    match state.storage.get_bucket_website(&bucket).await {
+        Ok(cfg) => {
+            let xml = WebsiteConfigurationXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to build response",
+                    &format!("/{}", bucket),
+                ),
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchWebsiteConfiguration",
+            "The specified bucket does not have a website configuration",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket website configuration (stub - accepts but no-op)
 pub async fn put_bucket_website(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketWebsite (stub)");
-    warn!(bucket = %bucket, "Bucket website configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketWebsite");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_website_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_website(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket website configuration (stub - no-op)
 pub async fn delete_bucket_website(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketWebsite (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "DeleteBucketWebsite");
+    match state.storage.delete_bucket_website(&bucket).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Replication Operations (stubs) ===
+// === Bucket Replication Operations ===
 
-/// Get bucket replication configuration (stub - returns ReplicationConfigurationNotFoundError)
+/// Get bucket replication configuration
 pub async fn get_bucket_replication(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketReplication");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "ReplicationConfigurationNotFoundError",
-        "The replication configuration was not found",
-    )
-    .await
+    match state.storage.get_bucket_replication(&bucket).await {
+        Ok(cfg) => {
+            let xml = ReplicationConfigurationXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to build response",
+                    &format!("/{}", bucket),
+                ),
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "ReplicationConfigurationNotFoundError",
+            "The replication configuration was not found",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket replication configuration (stub - accepts but no-op)
+/// Put bucket replication configuration
 pub async fn put_bucket_replication(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketReplication (stub)");
-    warn!(bucket = %bucket, "Bucket replication configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketReplication");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_replication_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_replication(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket replication configuration (stub - no-op)
+/// Delete bucket replication configuration
 pub async fn delete_bucket_replication(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketReplication (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "DeleteBucketReplication");
+    match state.storage.delete_bucket_replication(&bucket).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Accelerate Operations (stubs) ===
+// === Bucket Accelerate Operations ===
 
-const ACCELERATE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<AccelerateConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-<Status>Suspended</Status>
-</AccelerateConfiguration>"#;
-
-/// Get bucket accelerate configuration (stub - returns Suspended)
+/// Get bucket accelerate configuration
 pub async fn get_bucket_accelerate(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketAccelerateConfiguration");
-    get_xml_stub(&state.storage, &bucket, ACCELERATE_XML).await
+    match state.storage.get_bucket_accelerate(&bucket).await {
+        Ok(cfg) => {
+            let xml = AccelerateConfigurationXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to build response",
+                    &format!("/{}", bucket),
+                ),
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket accelerate configuration (stub - accepts but no-op)
+/// Put bucket accelerate configuration
 pub async fn put_bucket_accelerate(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketAccelerateConfiguration (stub)");
-    warn!(bucket = %bucket, "Bucket accelerate configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketAccelerateConfiguration");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_accelerate_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_accelerate(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Ownership Controls Operations (stubs) ===
+// === Bucket Ownership Controls Operations ===
 
-const OWNERSHIP_CONTROLS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<OwnershipControls xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-<Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule>
-</OwnershipControls>"#;
-
-/// Get bucket ownership controls (stub - returns BucketOwnerEnforced)
 pub async fn get_bucket_ownership_controls(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetBucketOwnershipControls");
-    get_xml_stub(&state.storage, &bucket, OWNERSHIP_CONTROLS_XML).await
+    match state.storage.get_bucket_ownership_controls(&bucket).await {
+        Ok(cfg) => {
+            let xml = OwnershipControlsXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to build response",
+                    &format!("/{}", bucket),
+                ),
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "OwnershipControlsNotFoundError",
+            "The bucket ownership controls were not found",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket ownership controls (stub - accepts but no-op)
 pub async fn put_bucket_ownership_controls(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketOwnershipControls (stub)");
-    warn!(bucket = %bucket, "Bucket ownership controls accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutBucketOwnershipControls");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_ownership_controls_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state
+        .storage
+        .put_bucket_ownership_controls(&bucket, &cfg)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket ownership controls (stub - no-op)
 pub async fn delete_bucket_ownership_controls(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketOwnershipControls (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "DeleteBucketOwnershipControls");
+    match state
+        .storage
+        .delete_bucket_ownership_controls(&bucket)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Public Access Block Operations (stubs) ===
+// === Public Access Block Operations ===
 
-const PUBLIC_ACCESS_BLOCK_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<PublicAccessBlockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-<BlockPublicAcls>true</BlockPublicAcls>
-<IgnorePublicAcls>true</IgnorePublicAcls>
-<BlockPublicPolicy>true</BlockPublicPolicy>
-<RestrictPublicBuckets>true</RestrictPublicBuckets>
-</PublicAccessBlockConfiguration>"#;
-
-/// Get public access block configuration (stub - returns all blocked)
 pub async fn get_public_access_block(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetPublicAccessBlock");
-    get_xml_stub(&state.storage, &bucket, PUBLIC_ACCESS_BLOCK_XML).await
+    match state.storage.get_bucket_public_access_block(&bucket).await {
+        Ok(cfg) => {
+            let xml = PublicAccessBlockConfigurationXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to build response",
+                    &format!("/{}", bucket),
+                ),
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchPublicAccessBlockConfiguration",
+            "The public access block configuration was not found",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put public access block configuration (stub - accepts but no-op)
 pub async fn put_public_access_block(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutPublicAccessBlock (stub)");
-    warn!(bucket = %bucket, "Public access block configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutPublicAccessBlock");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_public_access_block_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state
+        .storage
+        .put_bucket_public_access_block(&bucket, &cfg)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete public access block configuration (stub - no-op)
 pub async fn delete_public_access_block(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
-    info!(bucket = %bucket, "DeletePublicAccessBlock (stub)");
-    delete_stub(&state.storage, &bucket).await
-}
-
-// === Intelligent Tiering Operations (stubs) ===
-
-/// Get bucket intelligent tiering configuration (stub - returns not found)
-pub async fn get_bucket_intelligent_tiering(
-    State(state): State<AppState>,
-    Path(bucket): Path<String>,
-) -> Response {
-    info!(bucket = %bucket, "GetBucketIntelligentTieringConfiguration");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "NoSuchConfiguration",
-        "The intelligent tiering configuration does not exist",
-    )
-    .await
-}
-
-/// Put bucket intelligent tiering configuration (stub - accepts but no-op)
-pub async fn put_bucket_intelligent_tiering(
-    State(state): State<AppState>,
-    Path(bucket): Path<String>,
-) -> Response {
-    info!(bucket = %bucket, "PutBucketIntelligentTieringConfiguration (stub)");
-    warn!(bucket = %bucket, "Intelligent tiering configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
-}
-
-/// Delete bucket intelligent tiering configuration (stub - no-op)
-pub async fn delete_bucket_intelligent_tiering(
-    State(state): State<AppState>,
-    Path(bucket): Path<String>,
-) -> Response {
-    info!(bucket = %bucket, "DeleteBucketIntelligentTieringConfiguration (stub)");
-    delete_stub(&state.storage, &bucket).await
-}
-
-// === Object Legal Hold Operations (stubs) ===
-
-/// Helper for object operations that return ObjectLock errors
-async fn object_lock_error_stub(storage: &StorageEngine, bucket: &str, key: &str) -> Response {
-    match storage.bucket_exists(bucket).await {
-        Ok(true) => error_response(
-            StatusCode::BAD_REQUEST,
-            "InvalidRequest",
-            "Object Lock must be enabled to use this operation",
-            &format!("/{}/{}", bucket, key),
-        ),
-        Ok(false) => error_response(
+    info!(bucket = %bucket, "DeletePublicAccessBlock");
+    match state
+        .storage
+        .delete_bucket_public_access_block(&bucket)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
             StatusCode::NOT_FOUND,
             "NoSuchBucket",
             "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
+}
+
+// === Intelligent Tiering Operations ===
+
+/// Get bucket intelligent tiering configuration
+pub async fn get_bucket_intelligent_tiering(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+    id: String,
+) -> Response {
+    info!(bucket = %bucket, id = %id, "GetBucketIntelligentTieringConfiguration");
+    match state
+        .storage
+        .get_bucket_intelligent_tiering(&bucket, &id)
+        .await
+    {
+        Ok(cfg) => {
+            let xml = IntelligentTieringConfigurationXml::from_config(&cfg).to_xml();
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml")
+                .body(Body::from(xml))
+            {
+                Ok(resp) => resp,
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to build response",
+                    &format!("/{}", bucket),
+                ),
+            }
+        }
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchConfiguration",
+            "The intelligent tiering configuration does not exist",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
+}
+
+/// Put bucket intelligent tiering configuration
+pub async fn put_bucket_intelligent_tiering(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+    body_bytes: Bytes,
+) -> Response {
+    info!(bucket = %bucket, "PutBucketIntelligentTieringConfiguration");
+    let xml_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_intelligent_tiering_xml(xml_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    let id = cfg.id.clone();
+    match state
+        .storage
+        .put_bucket_intelligent_tiering(&bucket, &id, &cfg)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
+}
+
+/// Delete bucket intelligent tiering configuration
+pub async fn delete_bucket_intelligent_tiering(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+    id: String,
+) -> Response {
+    info!(bucket = %bucket, id = %id, "DeleteBucketIntelligentTieringConfiguration");
+    match state
+        .storage
+        .delete_bucket_intelligent_tiering(&bucket, &id)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "The specified bucket does not exist.",
+            &format!("/{}", bucket),
+        ),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
+}
+
+// === Object Legal Hold Operations ===
+
+/// Get the legal hold status for a specific object version.
+pub async fn get_object_legal_hold(
+    State(state): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    version_id: Option<String>,
+) -> Response {
+    info!(bucket = %bucket, key = %key, "GetObjectLegalHold");
+    let vid = version_id.unwrap_or_else(|| "null".to_string());
+    match state
+        .storage
+        .object_lock_manager
+        .get(&bucket, &key, &vid)
+        .await
+    {
+        Ok(meta) => {
+            let status = meta.legal_hold_status.unwrap_or_else(|| "OFF".to_string());
+            let xml = LegalHoldXml::from_status(&status).to_xml();
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                xml,
+            )
+                .into_response()
+        }
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchObjectLockConfiguration",
+            "The specified object does not have an Object Lock configuration.",
             &format!("/{}/{}", bucket, key),
         ),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
         Err(e) => storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
     }
 }
 
-/// Get object legal hold (stub - returns not found)
-pub async fn get_object_legal_hold(
-    State(state): State<AppState>,
-    Path((bucket, key)): Path<(String, String)>,
-) -> Response {
-    info!(bucket = %bucket, key = %key, "GetObjectLegalHold");
-    object_lock_error_stub(&state.storage, &bucket, &key).await
-}
-
-/// Put object legal hold (stub - returns error since Object Lock not enabled)
+/// Set the legal hold status for a specific object version.
 pub async fn put_object_legal_hold(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    version_id: Option<String>,
+    _bypass: bool,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, key = %key, "PutObjectLegalHold (stub)");
-    object_lock_error_stub(&state.storage, &bucket, &key).await
+    info!(bucket = %bucket, key = %key, "PutObjectLegalHold");
+    let body_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}/{}", bucket, key),
+            )
+        }
+    };
+    let status = match parse_legal_hold_xml(body_str) {
+        Ok(s) => s,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    let vid = version_id.unwrap_or_else(|| "null".to_string());
+    match state
+        .storage
+        .object_lock_manager
+        .put_legal_hold(&bucket, &key, &vid, &status)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
+    }
 }
 
-// === Object Retention Operations (stubs) ===
+// === Object Retention Operations ===
 
-/// Get object retention (stub - returns error since Object Lock not enabled)
+/// Get the retention policy for a specific object version.
 pub async fn get_object_retention(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    version_id: Option<String>,
 ) -> Response {
     info!(bucket = %bucket, key = %key, "GetObjectRetention");
-    object_lock_error_stub(&state.storage, &bucket, &key).await
+    let vid = version_id.unwrap_or_else(|| "null".to_string());
+    match state
+        .storage
+        .object_lock_manager
+        .get(&bucket, &key, &vid)
+        .await
+    {
+        Ok(meta) => match (meta.retention_mode, meta.retain_until_date) {
+            (Some(mode), Some(until)) => {
+                let xml = RetentionXml::new(&mode, &until).to_xml();
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                    xml,
+                )
+                    .into_response()
+            }
+            _ => error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchObjectLockConfiguration",
+                "The specified object does not have a retention configuration.",
+                &format!("/{}/{}", bucket, key),
+            ),
+        },
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchObjectLockConfiguration",
+            "The specified object does not have an Object Lock configuration.",
+            &format!("/{}/{}", bucket, key),
+        ),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
+    }
 }
 
-/// Put object retention (stub - returns error since Object Lock not enabled)
+/// Set the retention policy for a specific object version.
 pub async fn put_object_retention(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    version_id: Option<String>,
+    bypass: bool,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, key = %key, "PutObjectRetention (stub)");
-    object_lock_error_stub(&state.storage, &bucket, &key).await
+    info!(bucket = %bucket, key = %key, bypass = %bypass, "PutObjectRetention");
+    let body_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}/{}", bucket, key),
+            )
+        }
+    };
+    let (mode, until) = match parse_retention_xml(body_str) {
+        Ok(pair) => pair,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    let vid = version_id.unwrap_or_else(|| "null".to_string());
+    match state
+        .storage
+        .object_lock_manager
+        .put_retention(&bucket, &key, &vid, &mode, until, bypass)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::ObjectLocked(ref msg)) => error_response(
+            StatusCode::FORBIDDEN,
+            "AccessDenied",
+            msg,
+            &format!("/{}/{}", bucket, key),
+        ),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
+    }
 }
 
-// === Object Lock Configuration Operations (stubs) ===
+// === Object Lock Configuration Operations ===
 
-/// Get object lock configuration (stub - returns ObjectLockConfigurationNotFoundError)
+/// Get the bucket-level Object Lock configuration.
 pub async fn get_object_lock_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "GetObjectLockConfiguration");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "ObjectLockConfigurationNotFoundError",
-        "Object Lock configuration does not exist for this bucket",
-    )
-    .await
-}
-
-/// Helper for put object lock config that returns conflict error
-async fn put_object_lock_stub(storage: &StorageEngine, bucket: &str) -> Response {
-    match storage.bucket_exists(bucket).await {
-        Ok(true) => error_response(
-            StatusCode::CONFLICT,
-            "InvalidBucketState",
-            "Object Lock cannot be enabled on existing buckets",
+    match state.storage.get_bucket_object_lock(&bucket).await {
+        Ok(cfg) => {
+            let xml = ObjectLockConfigurationXml::from_config(&cfg);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                xml,
+            )
+                .into_response()
+        }
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "ObjectLockConfigurationNotFoundError",
+            "Object Lock configuration does not exist for this bucket",
             &format!("/{}", bucket),
         ),
-        Ok(false) => no_such_bucket(bucket),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
         Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
     }
 }
 
-/// Put object lock configuration (stub - returns error)
+/// Set the bucket-level Object Lock configuration.
 pub async fn put_object_lock_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutObjectLockConfiguration (stub)");
-    put_object_lock_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, "PutObjectLockConfiguration");
+    let body_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    let cfg = match parse_object_lock_configuration_xml(body_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    match state.storage.put_bucket_object_lock(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::InvalidBucketState(ref msg)) => error_response(
+            StatusCode::CONFLICT,
+            "InvalidBucketState",
+            msg,
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Metrics Configuration Operations (stubs) ===
+// === Bucket Metrics Configuration Operations ===
 
-/// Get bucket metrics configuration (stub - returns NoSuchConfiguration)
+/// Get a specific metrics configuration by ID.
 pub async fn get_bucket_metrics_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
 ) -> Response {
-    info!(bucket = %bucket, "GetBucketMetricsConfiguration");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "NoSuchConfiguration",
-        "The metrics configuration does not exist",
-    )
-    .await
+    info!(bucket = %bucket, id = %id, "GetBucketMetricsConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    match state.storage.get_bucket_metrics(&bucket, &id).await {
+        Ok(cfg) => {
+            let xml = MetricsConfigurationXml::from_config(&cfg);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                xml,
+            )
+                .into_response()
+        }
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchConfiguration",
+            "The specified metrics configuration does not exist",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket metrics configuration (stub - accepts but no-op)
+/// Persist a metrics configuration.
 pub async fn put_bucket_metrics_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketMetricsConfiguration (stub)");
-    warn!(bucket = %bucket, "Bucket metrics configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, id = %id, "PutBucketMetricsConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    let body_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => return malformed_xml_response("Invalid UTF-8 in request body"),
+    };
+    let mut cfg = match parse_metrics_xml(body_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    cfg.id = id.clone();
+    match state.storage.put_bucket_metrics(&bucket, &id, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket metrics configuration (stub - no-op)
+/// Delete a metrics configuration by ID.
 pub async fn delete_bucket_metrics_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketMetricsConfiguration (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, id = %id, "DeleteBucketMetricsConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    match state.storage.delete_bucket_metrics(&bucket, &id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-const LIST_METRICS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<ListMetricsConfigurationsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-<IsTruncated>false</IsTruncated>
-</ListMetricsConfigurationsResult>"#;
-
-/// List bucket metrics configurations (stub - returns empty list)
+/// List all metrics configurations for a bucket.
 pub async fn list_bucket_metrics_configurations(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "ListBucketMetricsConfigurations");
-    get_xml_stub(&state.storage, &bucket, LIST_METRICS_XML).await
+    match state.storage.list_bucket_metrics(&bucket).await {
+        Ok(configs) => {
+            let xml = ListMetricsConfigurationsResultXml::from_configs(&configs);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                xml,
+            )
+                .into_response()
+        }
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Analytics Configuration Operations (stubs) ===
+// === Bucket Analytics Configuration Operations ===
 
-/// Get bucket analytics configuration (stub - returns NoSuchConfiguration)
+/// Get a specific analytics configuration by ID.
 pub async fn get_bucket_analytics_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
 ) -> Response {
-    info!(bucket = %bucket, "GetBucketAnalyticsConfiguration");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "NoSuchConfiguration",
-        "The analytics configuration does not exist",
-    )
-    .await
+    info!(bucket = %bucket, id = %id, "GetBucketAnalyticsConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    match state.storage.get_bucket_analytics(&bucket, &id).await {
+        Ok(cfg) => {
+            let xml = AnalyticsConfigurationXml::from_config(&cfg);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                xml,
+            )
+                .into_response()
+        }
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchConfiguration",
+            "The specified analytics configuration does not exist",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket analytics configuration (stub - accepts but no-op)
+/// Persist an analytics configuration.
 pub async fn put_bucket_analytics_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketAnalyticsConfiguration (stub)");
-    warn!(bucket = %bucket, "Bucket analytics configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, id = %id, "PutBucketAnalyticsConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    let body_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => return malformed_xml_response("Invalid UTF-8 in request body"),
+    };
+    let mut cfg = match parse_analytics_xml(body_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    cfg.id = id.clone();
+    match state.storage.put_bucket_analytics(&bucket, &id, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket analytics configuration (stub - no-op)
+/// Delete an analytics configuration by ID.
 pub async fn delete_bucket_analytics_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketAnalyticsConfiguration (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, id = %id, "DeleteBucketAnalyticsConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    match state.storage.delete_bucket_analytics(&bucket, &id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-const LIST_ANALYTICS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<ListBucketAnalyticsConfigurationsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-<IsTruncated>false</IsTruncated>
-</ListBucketAnalyticsConfigurationsResult>"#;
-
-/// List bucket analytics configurations (stub - returns empty list)
+/// List all analytics configurations for a bucket.
 pub async fn list_bucket_analytics_configurations(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "ListBucketAnalyticsConfigurations");
-    get_xml_stub(&state.storage, &bucket, LIST_ANALYTICS_XML).await
+    match state.storage.list_bucket_analytics(&bucket).await {
+        Ok(configs) => {
+            let xml = ListBucketAnalyticsConfigurationsResultXml::from_configs(&configs);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                xml,
+            )
+                .into_response()
+        }
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-// === Bucket Inventory Configuration Operations (stubs) ===
+// === Bucket Inventory Configuration Operations ===
 
-/// Get bucket inventory configuration (stub - returns NoSuchConfiguration)
+/// Get a specific inventory configuration by ID.
 pub async fn get_bucket_inventory_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
 ) -> Response {
-    info!(bucket = %bucket, "GetBucketInventoryConfiguration");
-    get_not_found_stub(
-        &state.storage,
-        &bucket,
-        "NoSuchConfiguration",
-        "The inventory configuration does not exist",
-    )
-    .await
+    info!(bucket = %bucket, id = %id, "GetBucketInventoryConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    match state.storage.get_bucket_inventory(&bucket, &id).await {
+        Ok(cfg) => {
+            let xml = InventoryConfigurationXml::from_config(&cfg);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                xml,
+            )
+                .into_response()
+        }
+        Err(StorageError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            "NoSuchConfiguration",
+            "The specified inventory configuration does not exist",
+            &format!("/{}", bucket),
+        ),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Put bucket inventory configuration (stub - accepts but no-op)
+/// Persist an inventory configuration.
 pub async fn put_bucket_inventory_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
+    body_bytes: Bytes,
 ) -> Response {
-    info!(bucket = %bucket, "PutBucketInventoryConfiguration (stub)");
-    warn!(bucket = %bucket, "Bucket inventory configuration accepted but not implemented");
-    put_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, id = %id, "PutBucketInventoryConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    let body_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => return malformed_xml_response("Invalid UTF-8 in request body"),
+    };
+    let mut cfg = match parse_inventory_xml(body_str) {
+        Ok(c) => c,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    cfg.id = id.clone();
+    match state.storage.put_bucket_inventory(&bucket, &id, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-/// Delete bucket inventory configuration (stub - no-op)
+/// Delete an inventory configuration by ID.
 pub async fn delete_bucket_inventory_configuration(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    id: String,
 ) -> Response {
-    info!(bucket = %bucket, "DeleteBucketInventoryConfiguration (stub)");
-    delete_stub(&state.storage, &bucket).await
+    info!(bucket = %bucket, id = %id, "DeleteBucketInventoryConfiguration");
+    if id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "id query parameter is required",
+            &format!("/{}", bucket),
+        );
+    }
+    match state.storage.delete_bucket_inventory(&bucket, &id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
-const LIST_INVENTORY_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<ListInventoryConfigurationsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-<IsTruncated>false</IsTruncated>
-</ListInventoryConfigurationsResult>"#;
-
-/// List bucket inventory configurations (stub - returns empty list)
+/// List all inventory configurations for a bucket.
 pub async fn list_bucket_inventory_configurations(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
     info!(bucket = %bucket, "ListBucketInventoryConfigurations");
-    get_xml_stub(&state.storage, &bucket, LIST_INVENTORY_XML).await
+    match state.storage.list_bucket_inventory(&bucket).await {
+        Ok(configs) => {
+            let xml = ListInventoryConfigurationsResultXml::from_configs(&configs);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/xml")],
+                xml,
+            )
+                .into_response()
+        }
+        Err(StorageError::BucketNotFound) => no_such_bucket(&bucket),
+        Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
+    }
 }
 
 // === SelectObjectContent Operation (stub) ===
@@ -849,7 +1783,7 @@ pub async fn write_get_object_response(
     error_response(
         StatusCode::NOT_IMPLEMENTED,
         "NotImplemented",
-        "Lambda Object Lambda is not implemented in this gateway.",
+        "WriteGetObjectResponse is only valid when invoked from inside an S3 Object Lambda function. rs3gw is an S3 gateway, not Object Lambda.",
         "/WriteGetObjectResponse",
     )
 }
@@ -868,7 +1802,7 @@ pub async fn get_object_torrent(
         &state.storage,
         &bucket,
         &key,
-        "BitTorrent distribution is not implemented in this gateway.",
+        "GetObjectTorrent was deprecated by AWS and is no longer part of the S3 API. rs3gw does not support BitTorrent retrieval.",
     )
     .await
 }

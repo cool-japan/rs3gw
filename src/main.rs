@@ -17,6 +17,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use rs3gw::api::cors_middleware::cors_simple_request;
 use rs3gw::api::s3_router;
 use rs3gw::grpc::{GrpcConfig, GrpcServer};
 use rs3gw::metrics::{init_metrics, metrics_layer, metrics_tracker_layer};
@@ -157,6 +158,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             in_flight_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cors_simple_request,
         ))
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())

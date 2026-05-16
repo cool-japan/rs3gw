@@ -8,7 +8,7 @@ use axum::{
     extract::{FromRequest, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::{delete, get, head, post, put},
+    routing::{delete, get, head, options, post, put},
     Router,
 };
 use http_body_util::BodyExt;
@@ -18,8 +18,9 @@ use utoipa::OpenApi;
 
 use crate::AppState;
 
+use super::utils::{error_response, malformed_xml_response};
 use super::{
-    bucket_stubs, graphql, handlers, multipart, observability_handlers, openapi,
+    bucket_stubs, cors, graphql, handlers, multipart, observability_handlers, openapi,
     preprocessing_handlers, query_intelligence_handlers, replication_handlers,
     select_cache_handlers, tiering_handlers, training_handlers, websocket,
 };
@@ -57,6 +58,9 @@ pub struct ObjectQueryParams {
     /// Part number marker for ListParts pagination (return parts after this number)
     #[serde(rename = "part-number-marker")]
     pub part_number_marker: Option<u32>,
+    /// Version ID for Object Lock and versioned object operations
+    #[serde(rename = "versionId")]
+    pub version_id: Option<String>,
 }
 
 /// Query parameters for bucket-level POST operations
@@ -114,6 +118,8 @@ pub struct BucketPutQueryParams {
     pub analytics: Option<String>,
     /// If present, this is a PutBucketInventoryConfiguration operation
     pub inventory: Option<String>,
+    /// Configuration ID for metrics/analytics/inventory PUT operations
+    pub id: Option<String>,
 }
 
 /// Query parameters for bucket-level DELETE operations
@@ -142,6 +148,8 @@ pub struct BucketDeleteQueryParams {
     /// If present, this is a DeleteBucketIntelligentTieringConfiguration operation
     #[serde(rename = "intelligent-tiering")]
     pub intelligent_tiering: Option<String>,
+    /// Configuration ID for intelligent-tiering, metrics, analytics, or inventory delete operations
+    pub id: Option<String>,
     /// If present, this is a DeleteBucketMetricsConfiguration operation
     pub metrics: Option<String>,
     /// If present, this is a DeleteBucketAnalyticsConfiguration operation
@@ -227,6 +235,8 @@ pub struct BucketGetQueryParams {
     pub max_uploads: Option<u32>,
     #[serde(rename = "key-marker")]
     pub key_marker: Option<String>,
+    #[serde(rename = "version-id-marker")]
+    pub version_id_marker: Option<String>,
     #[serde(rename = "upload-id-marker")]
     pub upload_id_marker: Option<String>,
 }
@@ -283,6 +293,7 @@ async fn get_bucket_dispatcher(
                 delimiter: query.delimiter,
                 max_keys: query.max_keys,
                 key_marker: query.key_marker,
+                version_id_marker: query.version_id_marker,
             }),
         )
         .await
@@ -368,9 +379,13 @@ async fn get_bucket_dispatcher(
 
     // Check for GetBucketIntelligentTieringConfiguration (has ?intelligent-tiering)
     if query.intelligent_tiering.is_some() {
-        return bucket_stubs::get_bucket_intelligent_tiering(State(state), Path(bucket))
-            .await
-            .into_response();
+        return bucket_stubs::get_bucket_intelligent_tiering(
+            State(state),
+            Path(bucket),
+            query.id.unwrap_or_default(),
+        )
+        .await
+        .into_response();
     }
 
     // Check for GetObjectLockConfiguration (has ?object-lock)
@@ -383,10 +398,14 @@ async fn get_bucket_dispatcher(
     // Check for GetBucketMetricsConfiguration or ListBucketMetricsConfigurations (has ?metrics)
     if query.metrics.is_some() {
         // If there's an id parameter, it's GetBucketMetricsConfiguration, else List
-        if query.id.is_some() {
-            return bucket_stubs::get_bucket_metrics_configuration(State(state), Path(bucket))
-                .await
-                .into_response();
+        if let Some(ref id) = query.id {
+            return bucket_stubs::get_bucket_metrics_configuration(
+                State(state),
+                Path(bucket),
+                id.clone(),
+            )
+            .await
+            .into_response();
         } else {
             return bucket_stubs::list_bucket_metrics_configurations(State(state), Path(bucket))
                 .await
@@ -396,10 +415,14 @@ async fn get_bucket_dispatcher(
 
     // Check for GetBucketAnalyticsConfiguration or ListBucketAnalyticsConfigurations (has ?analytics)
     if query.analytics.is_some() {
-        if query.id.is_some() {
-            return bucket_stubs::get_bucket_analytics_configuration(State(state), Path(bucket))
-                .await
-                .into_response();
+        if let Some(ref id) = query.id {
+            return bucket_stubs::get_bucket_analytics_configuration(
+                State(state),
+                Path(bucket),
+                id.clone(),
+            )
+            .await
+            .into_response();
         } else {
             return bucket_stubs::list_bucket_analytics_configurations(State(state), Path(bucket))
                 .await
@@ -409,10 +432,14 @@ async fn get_bucket_dispatcher(
 
     // Check for GetBucketInventoryConfiguration or ListBucketInventoryConfigurations (has ?inventory)
     if query.inventory.is_some() {
-        if query.id.is_some() {
-            return bucket_stubs::get_bucket_inventory_configuration(State(state), Path(bucket))
-                .await
-                .into_response();
+        if let Some(ref id) = query.id {
+            return bucket_stubs::get_bucket_inventory_configuration(
+                State(state),
+                Path(bucket),
+                id.clone(),
+            )
+            .await
+            .into_response();
         } else {
             return bucket_stubs::list_bucket_inventory_configurations(State(state), Path(bucket))
                 .await
@@ -499,28 +526,72 @@ async fn put_object_dispatcher(
             .into_response();
     }
 
-    // Check for PutObjectAcl (has ?acl) - accept but ignore (stub)
+    // Check for PutObjectAcl (has ?acl)
     if query.acl.is_some() {
-        let _ = body.collect().await;
-        return handlers::put_object_acl(State(state), Path((bucket, key)))
-            .await
-            .into_response();
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "IncompleteBody",
+                    &format!("Failed to read request body: {}", e),
+                    &format!("/{}/{}", bucket, key),
+                )
+                .into_response();
+            }
+        };
+        return handlers::put_object_acl(
+            State(state),
+            Path((bucket, key)),
+            headers.clone(),
+            body_bytes,
+        )
+        .await
+        .into_response();
     }
 
-    // Check for PutObjectLegalHold (has ?legal-hold) - returns error (stub)
+    // Check for PutObjectLegalHold (has ?legal-hold)
     if query.legal_hold.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_object_legal_hold(State(state), Path((bucket, key)))
-            .await
-            .into_response();
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        let bypass = headers
+            .get("x-amz-bypass-governance-retention")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        return bucket_stubs::put_object_legal_hold(
+            State(state),
+            Path((bucket, key)),
+            query.version_id,
+            bypass,
+            body_bytes,
+        )
+        .await
+        .into_response();
     }
 
-    // Check for PutObjectRetention (has ?retention) - returns error (stub)
+    // Check for PutObjectRetention (has ?retention)
     if query.retention.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_object_retention(State(state), Path((bucket, key)))
-            .await
-            .into_response();
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        let bypass = headers
+            .get("x-amz-bypass-governance-retention")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        return bucket_stubs::put_object_retention(
+            State(state),
+            Path((bucket, key)),
+            query.version_id,
+            bypass,
+            body_bytes,
+        )
+        .await
+        .into_response();
     }
 
     // Check for UploadPartCopy (has uploadId, partNumber, and x-amz-copy-source)
@@ -595,9 +666,14 @@ async fn post_object_dispatcher(
 ) -> Response {
     // Check for RestoreObject (has ?restore)
     if query.restore.is_some() {
-        // Consume body but don't use it for the stub
-        let _ = body.collect().await;
-        return handlers::restore_object(State(state), Path((bucket, key)))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                tracing::error!("Failed to collect RestoreObject body: {}", e);
+                return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
+            }
+        };
+        return handlers::restore_object(State(state), Path((bucket, key)), body_bytes)
             .await
             .into_response();
     }
@@ -689,16 +765,24 @@ async fn get_object_dispatcher(
 
     // Check for GetObjectLegalHold (has ?legal-hold)
     if query.legal_hold.is_some() {
-        return bucket_stubs::get_object_legal_hold(State(state), Path((bucket, key)))
-            .await
-            .into_response();
+        return bucket_stubs::get_object_legal_hold(
+            State(state),
+            Path((bucket, key)),
+            query.version_id,
+        )
+        .await
+        .into_response();
     }
 
     // Check for GetObjectRetention (has ?retention)
     if query.retention.is_some() {
-        return bucket_stubs::get_object_retention(State(state), Path((bucket, key)))
-            .await
-            .into_response();
+        return bucket_stubs::get_object_retention(
+            State(state),
+            Path((bucket, key)),
+            query.version_id,
+        )
+        .await
+        .into_response();
     }
 
     // Check for GetObjectTorrent (has ?torrent)
@@ -737,6 +821,7 @@ async fn delete_object_dispatcher(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQueryParams>,
+    headers: HeaderMap,
 ) -> Response {
     // Check for DeleteObjectTagging (has ?tagging)
     if query.tagging.is_some() {
@@ -762,7 +847,65 @@ async fn delete_object_dispatcher(
         .into_response();
     }
 
-    // Default to DeleteObject
+    // Default to DeleteObject — check Object Lock protection first.
+    let version_str = query.version_id.as_deref().unwrap_or("null");
+    let bypass = headers
+        .get("x-amz-bypass-governance-retention")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    match state
+        .storage
+        .object_lock_manager
+        .is_protected(&bucket, &key, version_str)
+        .await
+    {
+        Ok(true) => {
+            // Determine whether legal hold or retention is responsible
+            let active_mode = state
+                .storage
+                .object_lock_manager
+                .retention_mode(&bucket, &key, version_str)
+                .await
+                .ok()
+                .flatten();
+
+            let resource = format!("/{}/{}", bucket, key);
+            if let Some(mode) = active_mode {
+                if mode == "COMPLIANCE" {
+                    return super::utils::error_response(
+                        StatusCode::FORBIDDEN,
+                        "AccessDenied",
+                        "Object is protected by a COMPLIANCE retention policy and cannot be deleted.",
+                        &resource,
+                    );
+                }
+                // GOVERNANCE — allow with bypass header
+                if bypass {
+                    return handlers::delete_object(State(state), Path((bucket, key)))
+                        .await
+                        .into_response();
+                }
+                return super::utils::error_response(
+                    StatusCode::FORBIDDEN,
+                    "AccessDenied",
+                    "Object is under GOVERNANCE retention; supply x-amz-bypass-governance-retention: true to delete.",
+                    &resource,
+                );
+            }
+            // Legal hold is active
+            return super::utils::error_response(
+                StatusCode::FORBIDDEN,
+                "AccessDenied",
+                "Object is protected by a Legal Hold and cannot be deleted.",
+                &resource,
+            );
+        }
+        Ok(false) => {}
+        Err(_) => {} // Do not block deletion on lock-check I/O error
+    }
+
     handlers::delete_object(State(state), Path((bucket, key)))
         .await
         .into_response()
@@ -789,7 +932,7 @@ async fn post_bucket_dispatcher(
                     .into_response();
             }
         };
-        return handlers::delete_objects(State(state), Path(bucket), body_bytes)
+        return handlers::delete_objects(State(state), Path(bucket), headers.clone(), body_bytes)
             .await
             .into_response();
     }
@@ -839,6 +982,7 @@ async fn put_bucket_dispatcher(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketPutQueryParams>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     // Check for PutBucketVersioning (has ?versioning)
@@ -858,11 +1002,23 @@ async fn put_bucket_dispatcher(
             .into_response();
     }
 
-    // Check for PutBucketAcl (has ?acl) - accept but ignore
+    // Check for PutBucketAcl (has ?acl)
     if query.acl.is_some() {
-        // Consume body but don't do anything with it
-        let _ = body.collect().await;
-        return StatusCode::OK.into_response();
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "IncompleteBody",
+                    &format!("Failed to read request body: {}", e),
+                    &format!("/{}", bucket),
+                )
+                .into_response();
+            }
+        };
+        return handlers::put_bucket_acl(State(state), Path(bucket), headers, body_bytes)
+            .await
+            .into_response();
     }
 
     // Check for PutBucketTagging (has ?tagging)
@@ -899,132 +1055,250 @@ async fn put_bucket_dispatcher(
             .into_response();
     }
 
-    // Check for PutBucketEncryption (has ?encryption) - accept but ignore (stub)
+    // Check for PutBucketEncryption (has ?encryption)
     if query.encryption.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_encryption(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read body: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        return bucket_stubs::put_bucket_encryption(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketLifecycleConfiguration (has ?lifecycle) - accept but ignore (stub)
+    // Check for PutBucketLifecycleConfiguration (has ?lifecycle)
     if query.lifecycle.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_lifecycle(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read body: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        return bucket_stubs::put_bucket_lifecycle(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketCors (has ?cors) - accept but ignore (stub)
+    // Check for PutBucketCors (has ?cors)
     if query.cors.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_cors(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read body: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        return bucket_stubs::put_bucket_cors(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketNotificationConfiguration (has ?notification) - accept but ignore (stub)
+    // Check for PutBucketNotificationConfiguration (has ?notification)
     if query.notification.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_notification(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        return bucket_stubs::put_bucket_notification(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketLogging (has ?logging) - accept but ignore (stub)
+    // Check for PutBucketLogging (has ?logging)
     if query.logging.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_logging(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read body: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        return bucket_stubs::put_bucket_logging(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketRequestPayment (has ?requestPayment) - accept but ignore (stub)
+    // Check for PutBucketRequestPayment (has ?requestPayment)
     if query.request_payment.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_request_payment(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read body: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        return bucket_stubs::put_bucket_request_payment(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketWebsite (has ?website) - accept but ignore (stub)
+    // Check for PutBucketWebsite (has ?website)
     if query.website.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_website(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read body: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        return bucket_stubs::put_bucket_website(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketReplication (has ?replication) - accept but ignore (stub)
+    // Check for PutBucketReplication (has ?replication)
     if query.replication.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_replication(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        return bucket_stubs::put_bucket_replication(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketAccelerateConfiguration (has ?accelerate) - accept but ignore (stub)
+    // Check for PutBucketAccelerateConfiguration (has ?accelerate)
     if query.accelerate.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_accelerate(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        return bucket_stubs::put_bucket_accelerate(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketOwnershipControls (has ?ownershipControls) - accept but ignore (stub)
+    // Check for PutBucketOwnershipControls (has ?ownershipControls)
     if query.ownership_controls.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_ownership_controls(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read body: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        return bucket_stubs::put_bucket_ownership_controls(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutPublicAccessBlock (has ?publicAccessBlock) - accept but ignore (stub)
+    // Check for PutPublicAccessBlock (has ?publicAccessBlock)
     if query.public_access_block.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_public_access_block(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read body: {}", e),
+                )
+                    .into_response();
+            }
+        };
+        return bucket_stubs::put_public_access_block(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketIntelligentTieringConfiguration (has ?intelligent-tiering) - accept but ignore (stub)
+    // Check for PutBucketIntelligentTieringConfiguration (has ?intelligent-tiering)
     if query.intelligent_tiering.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_intelligent_tiering(State(state), Path(bucket))
-            .await
-            .into_response();
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        return bucket_stubs::put_bucket_intelligent_tiering(
+            State(state),
+            Path(bucket),
+            body_bytes,
+        )
+        .await
+        .into_response();
     }
 
-    // Check for PutObjectLockConfiguration (has ?object-lock) - returns error (stub)
+    // Check for PutObjectLockConfiguration (has ?object-lock)
     if query.object_lock.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_object_lock_configuration(State(state), Path(bucket))
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        return bucket_stubs::put_object_lock_configuration(State(state), Path(bucket), body_bytes)
             .await
             .into_response();
     }
 
-    // Check for PutBucketMetricsConfiguration (has ?metrics) - accept but ignore (stub)
+    // Check for PutBucketMetricsConfiguration (has ?metrics)
     if query.metrics.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_metrics_configuration(State(state), Path(bucket))
-            .await
-            .into_response();
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        let id = query.id.unwrap_or_default();
+        return bucket_stubs::put_bucket_metrics_configuration(
+            State(state),
+            Path(bucket),
+            id,
+            body_bytes,
+        )
+        .await
+        .into_response();
     }
 
-    // Check for PutBucketAnalyticsConfiguration (has ?analytics) - accept but ignore (stub)
+    // Check for PutBucketAnalyticsConfiguration (has ?analytics)
     if query.analytics.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_analytics_configuration(State(state), Path(bucket))
-            .await
-            .into_response();
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        let id = query.id.unwrap_or_default();
+        return bucket_stubs::put_bucket_analytics_configuration(
+            State(state),
+            Path(bucket),
+            id,
+            body_bytes,
+        )
+        .await
+        .into_response();
     }
 
-    // Check for PutBucketInventoryConfiguration (has ?inventory) - accept but ignore (stub)
+    // Check for PutBucketInventoryConfiguration (has ?inventory)
     if query.inventory.is_some() {
-        let _ = body.collect().await;
-        return bucket_stubs::put_bucket_inventory_configuration(State(state), Path(bucket))
-            .await
-            .into_response();
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return malformed_xml_response("Failed to read request body").into_response(),
+        };
+        let id = query.id.unwrap_or_default();
+        return bucket_stubs::put_bucket_inventory_configuration(
+            State(state),
+            Path(bucket),
+            id,
+            body_bytes,
+        )
+        .await
+        .into_response();
     }
 
     // Default to CreateBucket
@@ -1094,7 +1368,13 @@ async fn put_bucket_dispatcher(
                 .into_response();
         }
     }
-    handlers::create_bucket(State(state), Path(bucket))
+    // Read x-amz-bucket-object-lock-enabled header for CreateBucket
+    let object_lock_enabled = headers
+        .get("x-amz-bucket-object-lock-enabled")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    handlers::create_bucket(State(state), Path(bucket), object_lock_enabled)
         .await
         .into_response()
 }
@@ -1169,30 +1449,37 @@ async fn delete_bucket_dispatcher(
             .into_response();
     }
 
-    // Check for DeleteBucketIntelligentTieringConfiguration (has ?intelligent-tiering) - no-op (stub)
+    // Check for DeleteBucketIntelligentTieringConfiguration (has ?intelligent-tiering)
     if query.intelligent_tiering.is_some() {
-        return bucket_stubs::delete_bucket_intelligent_tiering(State(state), Path(bucket))
-            .await
-            .into_response();
+        return bucket_stubs::delete_bucket_intelligent_tiering(
+            State(state),
+            Path(bucket),
+            query.id.unwrap_or_default(),
+        )
+        .await
+        .into_response();
     }
 
-    // Check for DeleteBucketMetricsConfiguration (has ?metrics) - no-op (stub)
+    // Check for DeleteBucketMetricsConfiguration (has ?metrics)
     if query.metrics.is_some() {
-        return bucket_stubs::delete_bucket_metrics_configuration(State(state), Path(bucket))
+        let id = query.id.clone().unwrap_or_default();
+        return bucket_stubs::delete_bucket_metrics_configuration(State(state), Path(bucket), id)
             .await
             .into_response();
     }
 
-    // Check for DeleteBucketAnalyticsConfiguration (has ?analytics) - no-op (stub)
+    // Check for DeleteBucketAnalyticsConfiguration (has ?analytics)
     if query.analytics.is_some() {
-        return bucket_stubs::delete_bucket_analytics_configuration(State(state), Path(bucket))
+        let id = query.id.clone().unwrap_or_default();
+        return bucket_stubs::delete_bucket_analytics_configuration(State(state), Path(bucket), id)
             .await
             .into_response();
     }
 
-    // Check for DeleteBucketInventoryConfiguration (has ?inventory) - no-op (stub)
+    // Check for DeleteBucketInventoryConfiguration (has ?inventory)
     if query.inventory.is_some() {
-        return bucket_stubs::delete_bucket_inventory_configuration(State(state), Path(bucket))
+        let id = query.id.clone().unwrap_or_default();
+        return bucket_stubs::delete_bucket_inventory_configuration(State(state), Path(bucket), id)
             .await
             .into_response();
     }
@@ -1433,4 +1720,8 @@ pub fn routes() -> Router<AppState> {
         .route("/{bucket}/{*key}", delete(delete_object_dispatcher))
         // S3 Lambda Object Lambda: WriteGetObjectResponse (stub)
         .route("/WriteGetObjectResponse", post(write_get_object_response_handler))
+        // CORS preflight (OPTIONS) for bucket and object endpoints
+        .route("/{bucket}", options(cors::options_bucket_handler))
+        .route("/{bucket}/", options(cors::options_bucket_handler))
+        .route("/{bucket}/{*key}", options(cors::options_object_handler))
 }

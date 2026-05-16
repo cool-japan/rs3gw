@@ -4,7 +4,6 @@ use super::image::Transformer;
 use super::types::*;
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::io::{Read, Write};
 
 /// Compression transformer
 pub struct CompressionTransformer;
@@ -58,32 +57,29 @@ impl Transformer for CompressionTransformer {
     }
 }
 
-/// Compress data using Zstandard
 fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, TransformationError> {
     let level = level.clamp(1, 22);
-    zstd::encode_all(data, level).map_err(|e| {
+    oxiarc_zstd::encode_all(data, level).map_err(|e| {
         TransformationError::CompressionError(format!("Zstd compression failed: {}", e))
     })
 }
 
-/// Compress data using Gzip
 fn compress_gzip(data: &[u8], level: i32) -> Result<Vec<u8>, TransformationError> {
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
-
-    let level = level.clamp(1, 9) as u32;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
-    encoder
-        .write_all(data)
-        .map_err(|e| TransformationError::CompressionError(format!("Gzip write failed: {}", e)))?;
-    encoder
-        .finish()
-        .map_err(|e| TransformationError::CompressionError(format!("Gzip finish failed: {}", e)))
+    let level = level.clamp(1, 9) as u8;
+    oxiarc_deflate::gzip_compress(data, level).map_err(|e| {
+        TransformationError::CompressionError(format!("Gzip compression failed: {}", e))
+    })
 }
 
-/// Compress data using LZ4
+/// Compress using LZ4 block format with size prefix (preserves wire compat with lz4_flex::compress_prepend_size)
 fn compress_lz4(data: &[u8]) -> Result<Vec<u8>, TransformationError> {
-    Ok(lz4_flex::compress_prepend_size(data))
+    let compressed = oxiarc_lz4::compress_block(data).map_err(|e| {
+        TransformationError::CompressionError(format!("LZ4 compression failed: {}", e))
+    })?;
+    let mut out = Vec::with_capacity(4 + compressed.len());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
 }
 
 /// Decompress data based on algorithm
@@ -98,28 +94,30 @@ pub fn decompress(
     }
 }
 
-/// Decompress Zstandard data
 fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, TransformationError> {
-    zstd::decode_all(data).map_err(|e| {
+    oxiarc_zstd::decode_all(data).map_err(|e| {
         TransformationError::CompressionError(format!("Zstd decompression failed: {}", e))
     })
 }
 
-/// Decompress Gzip data
 fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, TransformationError> {
-    use flate2::read::GzDecoder;
-
-    let mut decoder = GzDecoder::new(data);
-    let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed).map_err(|e| {
+    oxiarc_deflate::gzip_decompress(data).map_err(|e| {
         TransformationError::CompressionError(format!("Gzip decompression failed: {}", e))
-    })?;
-    Ok(decompressed)
+    })
 }
 
-/// Decompress LZ4 data
+/// Decompress LZ4 block data with size prefix (preserves wire compat with lz4_flex::decompress_size_prepended)
 fn decompress_lz4(data: &[u8]) -> Result<Vec<u8>, TransformationError> {
-    lz4_flex::decompress_size_prepended(data).map_err(|e| {
+    if data.len() < 4 {
+        return Err(TransformationError::CompressionError(
+            "LZ4 data too short: missing size prefix".to_string(),
+        ));
+    }
+    let size_bytes: [u8; 4] = data[..4].try_into().map_err(|_| {
+        TransformationError::CompressionError("LZ4 size prefix read failed".to_string())
+    })?;
+    let max_output = u32::from_le_bytes(size_bytes) as usize;
+    oxiarc_lz4::decompress_block(&data[4..], max_output).map_err(|e| {
         TransformationError::CompressionError(format!("LZ4 decompression failed: {}", e))
     })
 }

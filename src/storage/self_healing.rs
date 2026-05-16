@@ -403,7 +403,7 @@ impl SelfHealingManager {
         let mut hasher = Sha256::new();
         hasher.update(&data);
         let result = hasher.finalize();
-        Ok(format!("{:x}", result))
+        Ok(hex::encode(result))
     }
 
     /// Attempt to repair a corrupted object

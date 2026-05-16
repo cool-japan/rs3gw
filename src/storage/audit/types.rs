@@ -1,6 +1,7 @@
 //! Core audit types: errors, actions, outcomes, severity, and audit events.
 
 use chrono::{DateTime, Utc};
+use hmac::KeyInit;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;

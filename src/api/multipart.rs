@@ -18,8 +18,9 @@ use bytes::Bytes;
 use serde::Deserialize;
 use tracing::info;
 
+use crate::api::sse::{resolve_sse, SseDecision};
 use crate::api::websocket::{S3Event, S3EventType};
-use crate::storage::ByteRange;
+use crate::storage::{ByteRange, ObjectSseSidecar};
 use crate::AppState;
 
 use super::handlers::storage_error_to_response;
@@ -64,6 +65,12 @@ pub async fn create_multipart_upload(
         "CreateMultipartUpload"
     );
 
+    // Resolve SSE decision: keeps 501 for aws:kms / aws:kms:dsse; handles AES256.
+    let sse_decision = match resolve_sse(&state, &bucket, &headers).await {
+        Ok(d) => d,
+        Err(err_response) => return err_response,
+    };
+
     // Extract custom metadata
     let mut metadata = std::collections::HashMap::new();
     for (name, value) in headers.iter() {
@@ -72,6 +79,32 @@ pub async fn create_multipart_upload(
                 metadata.insert(meta_key.to_string(), v.to_string());
             }
         }
+    }
+
+    // SSE-KMS multipart is deferred — return 501 rather than silently storing plaintext.
+    if matches!(&sse_decision, SseDecision::SseKms { .. }) {
+        return error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "NotImplemented",
+            "SSE-KMS for multipart uploads is not yet supported.",
+            &format!("/{}/{}", bucket, key),
+        );
+    }
+
+    // Capture the AES256 flag before consuming `sse_decision` in the match below,
+    // so that the response header can be set without holding the enum across `.await`.
+    let is_sse_aes256 = matches!(&sse_decision, SseDecision::Aes256);
+
+    // Stamp SSE algorithm into metadata so that complete_multipart_upload can
+    // pick it up later for post-encryption, and GetObject / HeadObject can emit
+    // the correct header without loading the sidecar.
+    match sse_decision {
+        SseDecision::Aes256 => {
+            metadata.insert("__sse_algorithm__".to_string(), "AES256".to_string());
+        }
+        SseDecision::None => {}
+        // Forward-compat: ignore unknown variants (e.g., SseDecision::SseC from Phase 1A).
+        _ => {}
     }
 
     match state
@@ -87,12 +120,15 @@ pub async fn create_multipart_upload(
             state.event_broadcaster.broadcast(event);
 
             let result = InitiateMultipartUploadResult::new(&bucket, &key, &upload_id);
-            (
-                StatusCode::OK,
-                [("Content-Type", "application/xml")],
-                result.to_xml(),
-            )
-                .into_response()
+            let mut builder = axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml");
+            if is_sse_aes256 {
+                builder = builder.header("x-amz-server-side-encryption", "AES256");
+            }
+            builder
+                .body(axum::body::Body::from(result.to_xml()))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Err(e) => storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
     }
@@ -169,6 +205,17 @@ pub async fn upload_part_copy(
     Query(params): Query<MultipartQuery>,
     headers: HeaderMap,
 ) -> Response {
+    // SSE on multipart is deferred to Session 6 — return 501 rather than silently
+    // storing plaintext while the client believes the object is encrypted.
+    if headers.get("x-amz-server-side-encryption").is_some() {
+        return crate::api::utils::error_response(
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "NotImplemented",
+            "SSE-S3 for multipart uploads is not yet supported. Use single-part PutObject with x-amz-server-side-encryption: AES256.",
+            &format!("/{}/{}", bucket, key),
+        );
+    }
+
     let upload_id = match params.upload_id {
         Some(id) => id,
         None => {
@@ -414,6 +461,80 @@ pub async fn complete_multipart_upload(
         .await
     {
         Ok(etag) => {
+            // SSE-S3 post-encryption: if the multipart was initiated with AES256,
+            // the assembled object is currently plaintext. Encrypt it now.
+            //
+            // We read the __sse_algorithm__ flag from the object metadata that
+            // complete_multipart_upload preserved from the MultipartMetadata.
+            let sse_algorithm = state
+                .storage
+                .head_object(&bucket, &key)
+                .await
+                .ok()
+                .and_then(|m| m.metadata.get("__sse_algorithm__").cloned());
+
+            let is_sse = sse_algorithm.as_deref() == Some("AES256");
+
+            if is_sse {
+                // Read the assembled plaintext directly from disk using the canonical path.
+                let obj_path = state.storage.object_path(&bucket, &key);
+                match tokio::fs::read(&obj_path).await {
+                    Ok(plaintext_bytes) => {
+                        let aad = format!("{}/{}", bucket, key);
+                        match state
+                            .encryption
+                            .encrypt(&plaintext_bytes, Some(aad.as_bytes()))
+                            .await
+                        {
+                            Ok(enc) => {
+                                let sidecar = ObjectSseSidecar::from_encrypted(&enc, &bucket, &key);
+                                if let Err(e) = state
+                                    .storage
+                                    .overwrite_object_ciphertext(&bucket, &key, &enc.ciphertext)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to overwrite multipart plaintext with ciphertext \
+                                        for {}/{}: {}",
+                                        bucket,
+                                        key,
+                                        e
+                                    );
+                                }
+                                if let Err(e) =
+                                    state.storage.put_object_sse(&bucket, &key, &sidecar).await
+                                {
+                                    tracing::warn!(
+                                        "Failed to write SSE sidecar for multipart {}/{}: {}",
+                                        bucket,
+                                        key,
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Encryption failed for multipart {}/{}: {}; \
+                                    object stored as plaintext",
+                                    bucket,
+                                    key,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Could not read assembled multipart object {}/{} for SSE: {}; \
+                            object stored as plaintext",
+                            bucket,
+                            key,
+                            e
+                        );
+                    }
+                }
+            }
+
             // Broadcast multipart upload completed event
             let event = S3Event::new(S3EventType::MultipartUploadCompleted, bucket.clone())
                 .with_key(key.clone())
@@ -427,12 +548,15 @@ pub async fn complete_multipart_upload(
                 &key,
                 &format!("\"{}\"", etag),
             );
-            (
-                StatusCode::OK,
-                [("Content-Type", "application/xml")],
-                result.to_xml(),
-            )
-                .into_response()
+            let mut builder = axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/xml");
+            if is_sse {
+                builder = builder.header("x-amz-server-side-encryption", "AES256");
+            }
+            builder
+                .body(axum::body::Body::from(result.to_xml()))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Err(e) => storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
     }

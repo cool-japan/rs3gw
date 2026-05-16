@@ -6,6 +6,11 @@
 //!  - Multipart upload edge cases
 //!  - Checksum and caching headers
 //!  - Regression tests (empty bucket listing, HEAD 404, empty key, path traversal, zero-byte objects)
+//!  - Bucket notification round-trip via SDK
+//!  - Bucket replication round-trip via SDK
+//!  - Bucket accelerate configuration round-trip via SDK
+//!  - Bucket metrics configuration round-trip via SDK
+//!  - Bucket inventory configuration round-trip via SDK
 
 mod common;
 
@@ -929,5 +934,572 @@ async fn test_zero_byte_object_roundtrip() {
         head.content_length(),
         Some(0),
         "HEAD on zero-byte object must report Content-Length: 0"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SDK round-trip tests for new features
+// ---------------------------------------------------------------------------
+
+/// Test 1: Notification configuration round-trip via AWS SDK
+#[tokio::test]
+async fn test_sdk_bucket_notification_roundtrip() {
+    use aws_sdk_s3::types::{Event, NotificationConfiguration, TopicConfiguration};
+
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = unique_bucket();
+
+    client
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("create_bucket should succeed");
+
+    // Build a TopicConfiguration (build() returns Result)
+    let topic_config = TopicConfiguration::builder()
+        .topic_arn("arn:aws:sns:us-east-1:123456789012:test-topic")
+        .events(Event::S3ObjectCreated)
+        .build()
+        .expect("TopicConfiguration::build should succeed");
+
+    // NotificationConfiguration::build() returns the struct directly (no Result)
+    let notification_config = NotificationConfiguration::builder()
+        .topic_configurations(topic_config)
+        .build();
+
+    client
+        .put_bucket_notification_configuration()
+        .bucket(&bucket)
+        .notification_configuration(notification_config)
+        .send()
+        .await
+        .expect("put_bucket_notification_configuration should succeed");
+
+    // GET the notification config back
+    let get_resp = client
+        .get_bucket_notification_configuration()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("get_bucket_notification_configuration should succeed");
+
+    let topic_configs = get_resp.topic_configurations();
+    assert!(
+        !topic_configs.is_empty(),
+        "get notification config should return at least one TopicConfiguration"
+    );
+    let arn = topic_configs[0].topic_arn();
+    assert_eq!(
+        arn, "arn:aws:sns:us-east-1:123456789012:test-topic",
+        "TopicConfiguration ARN should round-trip"
+    );
+}
+
+/// Test 2: Replication configuration round-trip via AWS SDK
+#[tokio::test]
+#[allow(deprecated)]
+async fn test_sdk_bucket_replication_roundtrip() {
+    use aws_sdk_s3::types::{
+        Destination, ReplicationConfiguration, ReplicationRule, ReplicationRuleStatus,
+    };
+
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = unique_bucket();
+
+    client
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("create_bucket should succeed");
+
+    // Build destination (build() returns Result)
+    let destination = Destination::builder()
+        .bucket("arn:aws:s3:::dest-bucket")
+        .build()
+        .expect("Destination::build should succeed");
+
+    // Build a replication rule — use deprecated prefix("") for compatibility with
+    // server XML parser that does not require a <Filter> element
+    let rule = ReplicationRule::builder()
+        .status(ReplicationRuleStatus::Enabled)
+        .destination(destination)
+        .prefix("")
+        .build()
+        .expect("ReplicationRule::build should succeed");
+
+    // ReplicationConfiguration::build() returns Result
+    let replication = ReplicationConfiguration::builder()
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .rules(rule)
+        .build()
+        .expect("ReplicationConfiguration::build should succeed");
+
+    client
+        .put_bucket_replication()
+        .bucket(&bucket)
+        .replication_configuration(replication)
+        .send()
+        .await
+        .expect("put_bucket_replication should succeed");
+
+    // GET the replication config back
+    let get_resp = client
+        .get_bucket_replication()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("get_bucket_replication should succeed");
+
+    let config = get_resp
+        .replication_configuration()
+        .expect("replication configuration should be present");
+    assert_eq!(
+        config.role(),
+        "arn:aws:iam::123456789012:role/test-role",
+        "replication role ARN should round-trip"
+    );
+    assert_eq!(
+        config.rules().len(),
+        1,
+        "there should be exactly one replication rule"
+    );
+
+    // DELETE the replication config
+    client
+        .delete_bucket_replication()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("delete_bucket_replication should succeed");
+
+    // GET after DELETE should fail with NoSuchReplicationConfiguration (404)
+    let get_after_delete = client.get_bucket_replication().bucket(&bucket).send().await;
+    assert!(
+        get_after_delete.is_err(),
+        "get_bucket_replication after delete should return an error"
+    );
+}
+
+/// Test 3: Accelerate configuration round-trip via AWS SDK
+#[tokio::test]
+async fn test_sdk_bucket_accelerate_roundtrip() {
+    use aws_sdk_s3::types::{AccelerateConfiguration, BucketAccelerateStatus};
+
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = unique_bucket();
+
+    client
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("create_bucket should succeed");
+
+    // AccelerateConfiguration::build() returns the struct directly (no Result)
+    let accel_config = AccelerateConfiguration::builder()
+        .status(BucketAccelerateStatus::Enabled)
+        .build();
+
+    client
+        .put_bucket_accelerate_configuration()
+        .bucket(&bucket)
+        .accelerate_configuration(accel_config)
+        .send()
+        .await
+        .expect("put_bucket_accelerate_configuration should succeed");
+
+    let get_resp = client
+        .get_bucket_accelerate_configuration()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("get_bucket_accelerate_configuration should succeed");
+
+    assert_eq!(
+        get_resp.status(),
+        Some(&BucketAccelerateStatus::Enabled),
+        "accelerate status should be Enabled after PUT"
+    );
+
+    // PUT Suspended to verify round-trip with a different status
+    let accel_suspended = AccelerateConfiguration::builder()
+        .status(BucketAccelerateStatus::Suspended)
+        .build();
+
+    client
+        .put_bucket_accelerate_configuration()
+        .bucket(&bucket)
+        .accelerate_configuration(accel_suspended)
+        .send()
+        .await
+        .expect("put_bucket_accelerate_configuration (Suspended) should succeed");
+
+    let get_suspended = client
+        .get_bucket_accelerate_configuration()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("get_bucket_accelerate_configuration after Suspended should succeed");
+
+    assert_eq!(
+        get_suspended.status(),
+        Some(&BucketAccelerateStatus::Suspended),
+        "accelerate status should be Suspended after second PUT"
+    );
+}
+
+/// Test 4: Metrics configuration round-trip via AWS SDK
+#[tokio::test]
+async fn test_sdk_bucket_metrics_roundtrip() {
+    use aws_sdk_s3::types::MetricsConfiguration;
+
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = unique_bucket();
+
+    client
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("create_bucket should succeed");
+
+    let metrics_id = "sdk-metrics-1";
+
+    // MetricsConfiguration::build() returns Result
+    let metrics_config = MetricsConfiguration::builder()
+        .id(metrics_id)
+        .build()
+        .expect("MetricsConfiguration::build should succeed");
+
+    client
+        .put_bucket_metrics_configuration()
+        .bucket(&bucket)
+        .id(metrics_id)
+        .metrics_configuration(metrics_config)
+        .send()
+        .await
+        .expect("put_bucket_metrics_configuration should succeed");
+
+    // GET by ID
+    let get_resp = client
+        .get_bucket_metrics_configuration()
+        .bucket(&bucket)
+        .id(metrics_id)
+        .send()
+        .await
+        .expect("get_bucket_metrics_configuration should succeed");
+
+    let retrieved_config = get_resp
+        .metrics_configuration()
+        .expect("metrics configuration should be present");
+    assert_eq!(
+        retrieved_config.id(),
+        metrics_id,
+        "metrics configuration ID should round-trip"
+    );
+
+    // LIST — should contain our config
+    // NOTE: The server's ListBucketMetricsConfigurations returns empty even after a successful
+    // PUT+GET round-trip. This appears to be a server-side bug where the list storage path
+    // diverges from the get-by-id storage path. We assert the call itself succeeds (200 OK)
+    // but do not enforce the list contains the entry until the server bug is resolved.
+    let list_resp = client
+        .list_bucket_metrics_configurations()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("list_bucket_metrics_configurations should return 200");
+    let configs = list_resp.metrics_configuration_list();
+    let found = configs.iter().any(|c| c.id() == metrics_id);
+    assert!(found, "list should contain '{}' after put", metrics_id);
+
+    // DELETE by ID
+    client
+        .delete_bucket_metrics_configuration()
+        .bucket(&bucket)
+        .id(metrics_id)
+        .send()
+        .await
+        .expect("delete_bucket_metrics_configuration should succeed");
+}
+
+/// Test 5: Inventory configuration round-trip via AWS SDK
+#[tokio::test]
+async fn test_sdk_bucket_inventory_roundtrip() {
+    use aws_sdk_s3::types::{
+        InventoryConfiguration, InventoryDestination, InventoryFormat, InventoryFrequency,
+        InventoryIncludedObjectVersions, InventoryS3BucketDestination, InventorySchedule,
+    };
+
+    let (client, _temp_dir, _server) = setup_test_server().await;
+    let bucket = unique_bucket();
+
+    client
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("create_bucket should succeed");
+
+    let inventory_id = "sdk-inv-1";
+
+    // Build the nested destination structures (all build() → Result)
+    let s3_dest = InventoryS3BucketDestination::builder()
+        .bucket("arn:aws:s3:::inventory-dest")
+        .format(InventoryFormat::Csv)
+        .build()
+        .expect("InventoryS3BucketDestination::build should succeed");
+
+    let destination = InventoryDestination::builder()
+        .s3_bucket_destination(s3_dest)
+        .build();
+
+    let schedule = InventorySchedule::builder()
+        .frequency(InventoryFrequency::Daily)
+        .build()
+        .expect("InventorySchedule::build should succeed");
+
+    let inventory_config = InventoryConfiguration::builder()
+        .id(inventory_id)
+        .is_enabled(true)
+        .destination(destination)
+        .included_object_versions(InventoryIncludedObjectVersions::Current)
+        .schedule(schedule)
+        .build()
+        .expect("InventoryConfiguration::build should succeed");
+
+    client
+        .put_bucket_inventory_configuration()
+        .bucket(&bucket)
+        .id(inventory_id)
+        .inventory_configuration(inventory_config)
+        .send()
+        .await
+        .expect("put_bucket_inventory_configuration should succeed");
+
+    // GET by ID
+    let get_resp = client
+        .get_bucket_inventory_configuration()
+        .bucket(&bucket)
+        .id(inventory_id)
+        .send()
+        .await
+        .expect("get_bucket_inventory_configuration should succeed");
+
+    let retrieved = get_resp
+        .inventory_configuration()
+        .expect("inventory configuration should be present");
+    assert_eq!(
+        retrieved.id(),
+        inventory_id,
+        "inventory configuration ID should round-trip"
+    );
+    assert!(retrieved.is_enabled(), "inventory should be enabled");
+
+    // LIST — should contain our config
+    // NOTE: Same server-side list bug as metrics: the list operation returns empty
+    // even after a successful PUT+GET. We assert 200 OK but not list contents.
+    let list_resp = client
+        .list_bucket_inventory_configurations()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("list_bucket_inventory_configurations should return 200");
+    let inv_list = list_resp.inventory_configuration_list();
+    let found = inv_list.iter().any(|c| c.id() == inventory_id);
+    assert!(found, "list should contain '{}' after put", inventory_id);
+
+    // DELETE by ID
+    client
+        .delete_bucket_inventory_configuration()
+        .bucket(&bucket)
+        .id(inventory_id)
+        .send()
+        .await
+        .expect("delete_bucket_inventory_configuration should succeed");
+
+    // GET after DELETE — should fail
+    let get_after_delete = client
+        .get_bucket_inventory_configuration()
+        .bucket(&bucket)
+        .id(inventory_id)
+        .send()
+        .await;
+    assert!(
+        get_after_delete.is_err(),
+        "get_bucket_inventory_configuration after delete should return an error"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ACL round-trip: bucket
+// ---------------------------------------------------------------------------
+
+/// SDK round-trip: put a canned ACL on a bucket, then retrieve and verify grants.
+#[tokio::test]
+async fn test_sdk_get_put_bucket_acl_canned() {
+    use aws_sdk_s3::types::BucketCannedAcl;
+
+    let (client, _temp_dir, server) = setup_test_server().await;
+    let bucket = unique_bucket();
+    let http = reqwest::Client::new();
+
+    client
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("create_bucket should succeed");
+
+    // PUT canned ACL via SDK
+    client
+        .put_bucket_acl()
+        .bucket(&bucket)
+        .acl(BucketCannedAcl::PublicRead)
+        .send()
+        .await
+        .expect("put_bucket_acl (public-read) should succeed");
+
+    // GET via raw HTTP — verify the response is 200 and contains grant XML
+    let get_resp = http
+        .get(format!("{}/{}?acl", server.base_url, bucket))
+        .send()
+        .await
+        .expect("GET ?acl should complete");
+    assert_eq!(
+        get_resp.status(),
+        200,
+        "GetBucketAcl should return 200 after PUT public-read"
+    );
+    let body = get_resp.text().await.expect("read GetBucketAcl body");
+    assert!(
+        body.contains("AccessControlPolicy") || body.contains("Grant"),
+        "GetBucketAcl response should contain ACL XML, got: {}",
+        body
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ACL round-trip: object
+// ---------------------------------------------------------------------------
+
+/// SDK round-trip: put a canned ACL on an object, then retrieve and verify.
+#[tokio::test]
+async fn test_sdk_get_put_object_acl_canned() {
+    use aws_sdk_s3::primitives::ByteStream;
+    use aws_sdk_s3::types::ObjectCannedAcl;
+
+    let (client, _temp_dir, server) = setup_test_server().await;
+    let bucket = unique_bucket();
+    let key = "acl-test-object.txt";
+    let http = reqwest::Client::new();
+
+    client
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("create_bucket should succeed");
+
+    client
+        .put_object()
+        .bucket(&bucket)
+        .key(key)
+        .body(ByteStream::from_static(b"acl test content"))
+        .send()
+        .await
+        .expect("put_object should succeed");
+
+    // PUT canned ACL on the object via SDK
+    client
+        .put_object_acl()
+        .bucket(&bucket)
+        .key(key)
+        .acl(ObjectCannedAcl::PublicRead)
+        .send()
+        .await
+        .expect("put_object_acl (public-read) should succeed");
+
+    // GET object ACL via raw HTTP — verify 200 and XML
+    let get_resp = http
+        .get(format!("{}/{}/{}?acl", server.base_url, bucket, key))
+        .send()
+        .await
+        .expect("GET object ?acl should complete");
+    assert_eq!(
+        get_resp.status(),
+        200,
+        "GetObjectAcl should return 200 after PUT public-read"
+    );
+    let body = get_resp.text().await.expect("read GetObjectAcl body");
+    assert!(
+        body.contains("AccessControlPolicy") || body.contains("Grant"),
+        "GetObjectAcl response should contain ACL XML, got: {}",
+        body
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RestoreObject via SDK
+// ---------------------------------------------------------------------------
+
+/// SDK restore round-trip: PUT with GLACIER storage class, then restore via
+/// raw HTTP POST ?restore and assert 202 Accepted.
+#[tokio::test]
+async fn test_sdk_restore_object() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let bucket = unique_bucket();
+    let key = "sdk-glacier-restore.bin";
+    let http = reqwest::Client::new();
+
+    // Create bucket via raw HTTP
+    let create_resp = http
+        .put(format!("{}/{}", server.base_url, bucket))
+        .send()
+        .await
+        .expect("CreateBucket should complete");
+    assert_eq!(
+        create_resp.status(),
+        200,
+        "CreateBucket should return 200, got: {}",
+        create_resp.status()
+    );
+
+    // PUT object with GLACIER storage class — archives the object
+    let put_resp = http
+        .put(format!("{}/{}/{}", server.base_url, bucket, key))
+        .header("x-amz-storage-class", "GLACIER")
+        .body("sdk restore test body")
+        .send()
+        .await
+        .expect("PUT with GLACIER should complete");
+    assert_eq!(
+        put_resp.status(),
+        200,
+        "PutObject with GLACIER should return 200, got: {}",
+        put_resp.status()
+    );
+
+    // POST ?restore — initiate restore, expect 202 Accepted
+    let restore_resp = http
+        .post(format!("{}/{}/{}?restore", server.base_url, bucket, key))
+        .header("Content-Type", "application/xml")
+        .body(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<RestoreRequest>
+  <Days>1</Days>
+  <GlacierJobParameters><Tier>Standard</Tier></GlacierJobParameters>
+</RestoreRequest>"#,
+        )
+        .send()
+        .await
+        .expect("POST ?restore should complete");
+    assert_eq!(
+        restore_resp.status(),
+        202,
+        "RestoreObject on GLACIER-archived object should return 202 Accepted, got: {}",
+        restore_resp.status()
     );
 }

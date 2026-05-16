@@ -222,7 +222,7 @@ pub enum TransformAction {
         #[arg(short = 'w', long)]
         width: Option<u32>,
         /// Target height
-        #[arg(short = 'h', long)]
+        #[arg(short = 'H', long)]
         height: Option<u32>,
         /// Output format (jpeg, png, webp, gif, bmp, tiff)
         #[arg(short = 'f', long)]

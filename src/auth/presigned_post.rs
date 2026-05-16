@@ -5,6 +5,7 @@
 
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
+use hmac::KeyInit;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;

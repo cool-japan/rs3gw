@@ -307,7 +307,7 @@ impl BucketVersionIndex {
             .collect();
 
         // Sort by creation time, newest first
-        versions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        versions.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         versions
     }
 

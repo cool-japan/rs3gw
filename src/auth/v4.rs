@@ -52,6 +52,7 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, Duration, Utc};
+use hmac::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

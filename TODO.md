@@ -1,4 +1,4 @@
-## v0.2.0 (Current Release)
+## v0.2.1 (Current Release)
 
 ### Scope
 - S3-compatible REST API (core bucket/object/multipart operations)
@@ -161,56 +161,307 @@ Legend: [x]=implemented, [ ]=not yet/verify, [~]=compat stub (returns fixed/NotI
 - [x] GetBucketPolicy
 - [x] PutBucketPolicy
 - [x] DeleteBucketPolicy
-- [~] GetBucketAcl
-- [~] PutBucketAcl
-- [~] GetBucketVersioning
-- [~] PutBucketVersioning
-- [~] GetBucketEncryption
-- [~] PutBucketEncryption
-- [~] DeleteBucketEncryption
-- [~] GetBucketLifecycleConfiguration
-- [~] PutBucketLifecycleConfiguration
-- [~] DeleteBucketLifecycleConfiguration
-- [~] GetBucketCors
-- [~] PutBucketCors
-- [~] DeleteBucketCors
-- [~] GetBucketNotificationConfiguration
-- [~] PutBucketNotificationConfiguration
-- [~] GetBucketLogging
-- [~] PutBucketLogging
-- [~] GetBucketRequestPayment
-- [~] PutBucketRequestPayment
-- [~] GetBucketWebsite
-- [~] PutBucketWebsite
-- [~] DeleteBucketWebsite
-- [~] GetBucketReplication
-- [~] PutBucketReplication
-- [~] DeleteBucketReplication
-- [~] GetBucketAccelerateConfiguration
-- [~] PutBucketAccelerateConfiguration
-- [~] GetBucketOwnershipControls
-- [~] PutBucketOwnershipControls
-- [~] DeleteBucketOwnershipControls
-- [~] GetPublicAccessBlock
-- [~] PutPublicAccessBlock
-- [~] DeletePublicAccessBlock
-- [~] GetBucketIntelligentTieringConfiguration
-- [~] PutBucketIntelligentTieringConfiguration
-- [~] DeleteBucketIntelligentTieringConfiguration
-- [~] GetObjectLockConfiguration
-- [~] PutObjectLockConfiguration
-- [~] GetBucketMetricsConfiguration
-- [~] PutBucketMetricsConfiguration
-- [~] DeleteBucketMetricsConfiguration
-- [~] ListBucketMetricsConfigurations
-- [~] GetBucketAnalyticsConfiguration
-- [~] PutBucketAnalyticsConfiguration
-- [~] DeleteBucketAnalyticsConfiguration
-- [~] ListBucketAnalyticsConfigurations
-- [~] GetBucketInventoryConfiguration
-- [~] PutBucketInventoryConfiguration
-- [~] DeleteBucketInventoryConfiguration
-- [~] ListBucketInventoryConfigurations
+- [x] GetBucketAcl
+  - **Goal:** Real storage read of `bucket_acl.json`; fallback to FULL_CONTROL default if absent.
+  - **Design:** `StorageEngine::get_bucket_acl(bucket)` → serde_json deserialize `AclConfig`; on NotFound fall back to `AclConfig::canned_full_control("rs3gw","rs3gw")`. Convert to `AccessControlPolicy` XML.
+  - **Files:** `src/storage/core/bucket_acl.rs` (new), `src/api/handlers/functions/core.rs`
+  - **Tests:** `tests/stub_tests_acl.rs::test_bucket_acl_default`, `test_bucket_acl_canned_public_read`, `test_bucket_acl_explicit_xml`
+  - **Risk:** Existing callers that never PUT an ACL must still GET FULL_CONTROL (backward-compat via fallback).
+- [x] PutBucketAcl
+  - **Goal:** Parse `x-amz-acl` canned header OR explicit `<AccessControlPolicy>` XML body; persist to `bucket_acl.json`.
+  - **Design:** Precedence: both header+body → 400 UnexpectedContent; neither → 400 MissingSecurityHeader; header only → `AclConfig::from_canned`; body only → `parse_acl_xml`. Persist via `StorageEngine::put_bucket_acl`. Router currently inlines `let _ = body.collect(); return OK` at L984–989 — replace with body-forwarding to handler.
+  - **Files:** `src/storage/core/bucket_acl.rs`, `src/api/utils.rs`, `src/api/handlers/functions/core.rs`, `src/api/s3_router.rs`
+  - **Tests:** `test_bucket_acl_canned_public_read`, `test_bucket_acl_explicit_xml`, `test_bucket_acl_conflict`, `test_bucket_acl_missing`, `test_canned_acl_invalid`
+  - **Risk:** Canned ACL `public-read-write` materializes as three grants (owner FULL_CONTROL + AllUsers READ + AllUsers WRITE).
+- [x] GetBucketVersioning (planned 2026-05-11)
+  - **Goal:** Return current versioning state (`Enabled`, `Suspended`, or empty) as AWS `VersioningConfiguration` XML; `NoSuchBucket` when bucket absent.
+  - **Design:** Call `state.storage.get_bucket_versioning(&bucket)` → `BucketVersioningConfig`; map `Enabled`→`Some("Enabled")`, `Suspended`→`Some("Suspended")`, `Unversioned`→`None` in `VersioningConfiguration::new(status)`; call `.to_xml()`. Extend `VersioningConfiguration::to_xml` at `xml_responses.rs:656` to also handle `Suspended`. Located in `src/api/handlers/functions/core.rs:398-422`.
+  - **Files:** `src/api/handlers/functions/core.rs`, `src/api/xml_responses.rs` (extend to_xml for Suspended).
+  - **Tests:** Functional in `tests/stub_tests.rs::test_bucket_versioning` (extend round-trip); GET on non-versioned bucket → empty XML; PUT Enabled → GET shows Enabled; PUT Suspended → GET shows Suspended.
+  - **Risk:** Low — storage versioning manager is already wired in types.rs:1580-1634.
+- [x] PutBucketVersioning (planned 2026-05-11)
+  - **Goal:** Accept `VersioningConfiguration` XML body and enable or suspend versioning on the bucket; return 200 OK.
+  - **Design:** Parse XML via new `parse_versioning_xml` in `src/api/utils.rs`; on `Status == "Enabled"` call `storage.enable_bucket_versioning`; on `Status == "Suspended"` call `storage.suspend_bucket_versioning`; absent or unknown Status → 400 MalformedXML. Router already collects body bytes for this path (`s3_router.rs:478–489`). Located in `src/api/handlers/functions/core.rs:445-471`.
+  - **Files:** `src/api/handlers/functions/core.rs`, `src/api/utils.rs` (new `parse_versioning_xml`).
+  - **Tests:** PUT Enabled → 200 OK; PUT Suspended → 200 OK; PUT invalid body → 400 MalformedXML.
+  - **Risk:** Low — `enable_bucket_versioning` / `suspend_bucket_versioning` already exist in `StorageEngine`.
+- [x] GetBucketEncryption (planned 2026-05-11)
+  - **Goal:** Return bucket's `ServerSideEncryptionConfiguration` as AWS-format XML; `ServerSideEncryptionConfigurationNotFoundError` (404) if unset; `NoSuchBucket` if bucket absent.
+  - **Design:** Read JSON from `<bucket>/bucket_encryption.json` via `StorageEngine::get_bucket_encryption` (NotFound → 404); serialize as `SseConfigurationXml` via quick-xml serialize feature.
+  - **Files:** `src/api/bucket_stubs.rs` (handler body), `src/storage/core/types.rs` (new method + path helper), `src/api/xml_responses.rs` (new `SseConfigurationXml`).
+  - **Tests:** unit XML round-trip; functional in `tests/stub_tests.rs::test_bucket_encryption`; golden in `tests/xml_golden_tests.rs`; aws-sdk round-trip in `tests/aws_sdk_compat_tests_extended.rs`.
+  - **Risk:** Low — mirrors tagging pattern exactly.
+- [x] PutBucketEncryption (planned 2026-05-11)
+  - **Goal:** Accept `ServerSideEncryptionConfiguration` XML body, validate (SSEAlgorithm ∈ {AES256, aws:kms, aws:kms:dsse}), persist per-bucket, return 200 OK empty body.
+  - **Design:** Parse XML via hand-rolled `parse_encryption_xml` in `src/api/utils.rs` (mirror `parse_tagging_xml`); persist as `EncryptionConfig` JSON via `StorageEngine::put_bucket_encryption`; router collects body bytes (change `s3_router.rs:902-924` like `put_bucket_tagging` at L868-880).
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/s3_router.rs`, `src/api/utils.rs`, `src/storage/core/types.rs`.
+  - **Tests:** PUT then GET round-trip; invalid SSEAlgorithm → MalformedXML.
+  - **Risk:** Handler signature change (2-arg → 3-arg Bytes); router edit required.
+- [x] DeleteBucketEncryption (planned 2026-05-11)
+  - **Goal:** Remove per-bucket `bucket_encryption.json` (idempotent); return 204 No Content.
+  - **Design:** Call `StorageEngine::delete_bucket_encryption` (mirrors `delete_bucket_tagging`); after delete, GET returns `ServerSideEncryptionConfigurationNotFoundError`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/types.rs`.
+  - **Tests:** DELETE then GET → 404; idempotent DELETE on unset bucket.
+  - **Risk:** Low.
+- [x] GetBucketLifecycleConfiguration (planned 2026-05-11)
+  - **Goal:** Return bucket lifecycle rules as AWS `LifecycleConfiguration` XML; `NoSuchLifecycleConfiguration` (404) if unset; `NoSuchBucket` if bucket absent.
+  - **Design:** Call `state.storage.get_bucket_lifecycle(&bucket)` (new method in `src/storage/core/bucket_config.rs`); serialize via `LifecycleConfigurationXml::from_config(&cfg).to_xml()`. Persisted as `bucket_lifecycle.json` per-bucket.
+  - **Files:** `src/api/bucket_stubs.rs` (handler body), `src/storage/core/bucket_config.rs` (new), `src/api/xml_responses.rs` (new `LifecycleConfigurationXml`).
+  - **Tests:** GET before PUT → 404 NoSuchLifecycleConfiguration; PUT → GET round-trip; DELETE → GET → 404.
+  - **Risk:** Low — identical pattern to GetBucketEncryption.
+- [x] PutBucketLifecycleConfiguration (planned 2026-05-11)
+  - **Goal:** Accept `LifecycleConfiguration` XML body, validate (Rule requires Status ∈ {Enabled, Disabled}; non-negative days), persist per-bucket, return 200 OK.
+  - **Design:** Parse via `parse_lifecycle_xml` in `src/api/utils.rs`; persist as `LifecycleConfig` JSON via `StorageEngine::put_bucket_lifecycle`; router fixed to forward body bytes (`s3_router.rs:919-925`).
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/s3_router.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** PUT valid body → 200 OK; invalid Status → 400 MalformedXML; negative days → 400 MalformedXML.
+  - **Risk:** Router body-forwarding fix required (same pattern as PutBucketEncryption).
+- [x] DeleteBucketLifecycleConfiguration (planned 2026-05-11)
+  - **Goal:** Remove per-bucket `bucket_lifecycle.json` (idempotent); return 204 No Content.
+  - **Design:** Call `StorageEngine::delete_bucket_lifecycle`; subsequent GET returns `NoSuchLifecycleConfiguration`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** DELETE then GET → 404; idempotent DELETE on bucket with no lifecycle configured.
+  - **Risk:** Low.
+- [x] GetBucketCors (planned 2026-05-11)
+  - **Goal:** Return bucket's `CORSConfiguration` as AWS-format XML; `NoSuchCORSConfiguration` (404) if unset; `NoSuchBucket` if bucket absent.
+  - **Design:** Read JSON from `<bucket>/bucket_cors.json` via `StorageEngine::get_bucket_cors` (NotFound → 404); serialize as `CorsConfigurationXml` (CORSRule list with AllowedMethod/AllowedOrigin/AllowedHeader/ExposeHeader/MaxAgeSeconds).
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/types.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** round-trip; `NoSuchCORSConfiguration` before any PUT.
+  - **Risk:** Low.
+- [x] PutBucketCors (planned 2026-05-11)
+  - **Goal:** Accept `CORSConfiguration` XML body, validate (AllowedMethod ∈ {GET,PUT,POST,DELETE,HEAD}; AllowedOrigin required), persist per-bucket, return 200 OK.
+  - **Design:** Parse via `parse_cors_xml` in `src/api/utils.rs`; persist as `CorsConfig` JSON via `StorageEngine::put_bucket_cors`; router collects body bytes (same `s3_router.rs` change as PutBucketEncryption).
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/s3_router.rs`, `src/api/utils.rs`, `src/storage/core/types.rs`.
+  - **Tests:** PUT then GET → matching config; missing AllowedOrigin → MalformedXML.
+  - **Risk:** Low.
+- [x] DeleteBucketCors (planned 2026-05-11)
+  - **Goal:** Remove per-bucket `bucket_cors.json` (idempotent); return 204 No Content.
+  - **Design:** Call `StorageEngine::delete_bucket_cors`; subsequent GET → `NoSuchCORSConfiguration`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/types.rs`.
+  - **Tests:** DELETE then GET → 404; idempotent DELETE on unset bucket.
+  - **Risk:** Low.
+- [x] GetBucketNotificationConfiguration (planned 2026-05-13)
+  - **Goal:** Return the bucket's SNS/SQS/Lambda event notifications as AWS-format `NotificationConfiguration` XML; return empty `<NotificationConfiguration/>` (200) when unset (AWS never 404s this endpoint); `NoSuchBucket` if bucket absent.
+  - **Design:** Read JSON from `<bucket>/bucket_notification.json` via `StorageEngine::get_bucket_notification`; serialize as `NotificationConfigXml::from_config(&cfg).to_xml()`. On `NotFound`, emit empty `<NotificationConfiguration/>`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** golden in `tests/xml_golden_tests.rs`; PUT→GET round-trip in `tests/stub_tests.rs`.
+  - **Risk:** Low — same pattern as Session 2 BucketEncryption.
+- [x] PutBucketNotificationConfiguration (planned 2026-05-13)
+  - **Goal:** Accept and persist SNS/SQS/Lambda event notification configuration. Empty `<NotificationConfiguration/>` body is valid (disables all notifications). Returns 200 OK.
+  - **Design:** Collect body → UTF-8 decode → `parse_notification_xml` → `storage.put_bucket_notification` → 200 OK. Router switches from body-discarding to body-forwarding idiom.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** Round-trip in `tests/stub_tests.rs::test_bucket_notification`.
+  - **Risk:** Low.
+- [x] GetBucketLogging (planned 2026-05-11)
+  - **Goal:** Return bucket logging config as `BucketLoggingStatus` XML; if unset return 200 with empty `<BucketLoggingStatus/>`; `NoSuchBucket` if bucket absent.
+  - **Design:** Call `StorageEngine::get_bucket_logging`; on NotFound return empty `LoggingConfigXml { target_bucket: None, target_prefix: None }` (AWS never 404s logging — it returns empty config). Persist as `bucket_logging.json`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** GET before PUT → 200 empty; PUT → GET round-trip.
+  - **Risk:** Low — note empty-config semantics differ from Lifecycle (no 404 on unset).
+- [x] PutBucketLogging (planned 2026-05-11)
+  - **Goal:** Accept `BucketLoggingStatus` XML body; empty body disables logging; otherwise TargetBucket is required; persist; return 200 OK.
+  - **Design:** Parse via `parse_logging_xml`; persist via `StorageEngine::put_bucket_logging`; router body-forwarding fix at `s3_router.rs:952-958`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/s3_router.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** PUT with TargetBucket → GET round-trip; PUT empty → GET returns empty; missing TargetBucket when rules present → 400 MalformedXML.
+  - **Risk:** Low.
+- [x] GetBucketRequestPayment (planned 2026-05-11)
+  - **Goal:** Return `RequestPaymentConfiguration` XML; if unset return default `<Payer>BucketOwner</Payer>` (AWS never 404s this); `NoSuchBucket` if bucket absent.
+  - **Design:** Call `StorageEngine::get_bucket_request_payment`; on NotFound return default `RequestPaymentConfig { payer: "BucketOwner".to_string() }`. Root element `RequestPaymentConfiguration`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** GET before PUT → 200 with Payer=BucketOwner; PUT Requester → GET returns Requester.
+  - **Risk:** Low — default-value semantics (not 404) differ slightly from other families.
+- [x] PutBucketRequestPayment (planned 2026-05-11)
+  - **Goal:** Accept `RequestPaymentConfiguration` XML; validate Payer ∈ {Requester, BucketOwner}; persist; return 200 OK.
+  - **Design:** Parse via `parse_request_payment_xml`; persist via `StorageEngine::put_bucket_request_payment`; router body-forwarding fix at `s3_router.rs:960-966`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/s3_router.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** PUT Requester → GET returns Requester; PUT BucketOwner → GET returns BucketOwner; invalid Payer → 400 MalformedXML.
+  - **Risk:** Low.
+- [x] GetBucketWebsite (planned 2026-05-11)
+  - **Goal:** Return `WebsiteConfiguration` XML; `NoSuchWebsiteConfiguration` (404) if unset; `NoSuchBucket` if bucket absent.
+  - **Design:** Call `StorageEngine::get_bucket_website`; serialize as `WebsiteConfigurationXml::from_config(&cfg).to_xml()`. Persisted as `bucket_website.json`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** GET before PUT → 404 NoSuchWebsiteConfiguration; PUT → GET round-trip; DELETE → GET → 404.
+  - **Risk:** Low.
+- [x] PutBucketWebsite (planned 2026-05-11)
+  - **Goal:** Accept `WebsiteConfiguration` XML; validate (at least one of IndexDocument/RedirectAllRequestsTo/RoutingRules; RedirectAllRequestsTo requires HostName); persist; return 200 OK.
+  - **Design:** Parse via `parse_website_xml`; persist via `StorageEngine::put_bucket_website`; router body-forwarding fix at `s3_router.rs:968-974`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/s3_router.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** PUT IndexDocument → GET round-trip; PUT RedirectAllRequestsTo → GET; missing required fields → 400.
+  - **Risk:** Moderate — Website has the most complex XML schema (routing rules, redirects).
+- [x] DeleteBucketWebsite (planned 2026-05-11)
+  - **Goal:** Remove per-bucket `bucket_website.json` (idempotent); return 204 No Content.
+  - **Design:** Call `StorageEngine::delete_bucket_website`; subsequent GET returns `NoSuchWebsiteConfiguration`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** DELETE then GET → 404; idempotent DELETE.
+  - **Risk:** Low.
+- [x] GetBucketReplication (planned 2026-05-13)
+  - **Goal:** Return the bucket's cross-region replication configuration as `ReplicationConfiguration` XML; emit `ReplicationConfigurationNotFoundError` (404) when unset.
+  - **Design:** Read JSON from `<bucket>/bucket_replication.json`; serialize as `ReplicationConfigXml::from_config(&cfg).to_xml()`. On `NotFound`, return 404 `ReplicationConfigurationNotFoundError`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** Round-trip in `tests/stub_tests.rs::test_bucket_replication`.
+  - **Risk:** Low.
+- [x] PutBucketReplication (planned 2026-05-13)
+  - **Goal:** Accept and persist cross-region replication config. Validates `<Role>` non-empty and ≥1 `<Rule>`. Returns 200 OK.
+  - **Design:** Collect body → parse → `storage.put_bucket_replication` → 200.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** Round-trip in `tests/stub_tests.rs::test_bucket_replication`.
+  - **Risk:** Low.
+- [x] DeleteBucketReplication (planned 2026-05-13)
+  - **Goal:** Remove the bucket's replication configuration. Idempotent (204 even if not set).
+  - **Design:** `storage.delete_bucket_replication(bucket)` → 204 No Content. On `BucketNotFound` → `NoSuchBucket`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** DELETE→GET→404 in `tests/stub_tests.rs::test_bucket_replication`.
+  - **Risk:** Low.
+- [x] GetBucketAccelerateConfiguration (planned 2026-05-13)
+  - **Goal:** Return the bucket's Transfer Acceleration status as `AccelerateConfiguration` XML. Returns `<Status>Suspended</Status>` (200) by default — AWS never 404s this endpoint.
+  - **Design:** Read JSON from `<bucket>/bucket_accelerate.json`; on `NotFound`, default to `AccelerateConfig { status: "Suspended" }`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** Round-trip in `tests/stub_tests.rs::test_bucket_accelerate`.
+  - **Risk:** Low.
+- [x] PutBucketAccelerateConfiguration (planned 2026-05-13)
+  - **Goal:** Accept `<AccelerateConfiguration><Status>Enabled|Suspended</Status></AccelerateConfiguration>` and persist. Returns 200 OK.
+  - **Design:** Validate `<Status>` ∈ {Enabled, Suspended}; persist; 200.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** Round-trip in `tests/stub_tests.rs::test_bucket_accelerate`.
+  - **Risk:** Low.
+- [x] GetBucketOwnershipControls (planned 2026-05-11)
+  - **Goal:** Return `OwnershipControls` XML; `OwnershipControlsNotFoundError` (404) if unset; `NoSuchBucket` if bucket absent.
+  - **Design:** Call `StorageEngine::get_bucket_ownership_controls`; serialize as `OwnershipControlsXml::from_config(&cfg).to_xml()`. Persisted as `bucket_ownership_controls.json`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** GET before PUT → 404; PUT BucketOwnerEnforced → GET round-trip; DELETE → GET → 404.
+  - **Risk:** Low.
+- [x] PutBucketOwnershipControls (planned 2026-05-11)
+  - **Goal:** Accept `OwnershipControls` XML; validate ObjectOwnership ∈ {BucketOwnerPreferred, ObjectWriter, BucketOwnerEnforced}; persist; return 200 OK.
+  - **Design:** Parse via `parse_ownership_controls_xml`; persist via `StorageEngine::put_bucket_ownership_controls`; router body-forwarding fix at `s3_router.rs:992-998`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/s3_router.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** PUT BucketOwnerEnforced → GET; invalid ObjectOwnership → 400 MalformedXML.
+  - **Risk:** Low.
+- [x] DeleteBucketOwnershipControls (planned 2026-05-11)
+  - **Goal:** Remove per-bucket `bucket_ownership_controls.json` (idempotent); return 204 No Content.
+  - **Design:** Call `StorageEngine::delete_bucket_ownership_controls`; subsequent GET returns `OwnershipControlsNotFoundError`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** DELETE then GET → 404; idempotent DELETE.
+  - **Risk:** Low.
+- [x] GetPublicAccessBlock (planned 2026-05-11)
+  - **Goal:** Return `PublicAccessBlockConfiguration` XML; `NoSuchPublicAccessBlockConfiguration` (404) if unset; `NoSuchBucket` if bucket absent.
+  - **Design:** Call `StorageEngine::get_bucket_public_access_block`; serialize as `PublicAccessBlockConfigurationXml::from_config(&cfg).to_xml()`. Persisted as `bucket_public_access_block.json`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** GET before PUT → 404; PUT all-true → GET round-trip; DELETE → GET → 404.
+  - **Risk:** Low.
+- [x] PutPublicAccessBlock (planned 2026-05-11)
+  - **Goal:** Accept `PublicAccessBlockConfiguration` XML; validate four boolean fields (default false if absent per AWS); persist; return 200 OK.
+  - **Design:** Parse via `parse_public_access_block_xml`; persist via `StorageEngine::put_bucket_public_access_block`; router body-forwarding fix at `s3_router.rs:1000-1006`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/s3_router.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** PUT all-true → GET returns all-true; PUT empty → GET returns all-false.
+  - **Risk:** Low.
+- [x] DeletePublicAccessBlock (planned 2026-05-11)
+  - **Goal:** Remove per-bucket `bucket_public_access_block.json` (idempotent); return 204 No Content.
+  - **Design:** Call `StorageEngine::delete_bucket_public_access_block`; subsequent GET returns `NoSuchPublicAccessBlockConfiguration`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`.
+  - **Tests:** DELETE then GET → 404; idempotent DELETE.
+  - **Risk:** Low.
+- [x] GetBucketIntelligentTieringConfiguration (planned 2026-05-13)
+  - **Goal:** Return a single IntelligentTiering configuration by `id` query parameter as `IntelligentTieringConfiguration` XML; 404 `NoSuchConfiguration` when not found.
+  - **Design:** Read JSON from `<bucket>/bucket_intelligent_tiering/<sanitized_id>.json`; serialize as `IntelligentTieringConfigXml`. Router must forward `query.id` to handler.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`, `src/api/s3_router.rs`.
+  - **Tests:** Round-trip in `tests/stub_tests.rs::test_bucket_intelligent_tiering`.
+  - **Risk:** Low — id-keyed subdirectory same as Metrics pattern.
+- [x] PutBucketIntelligentTieringConfiguration (planned 2026-05-13)
+  - **Goal:** Accept and persist an IntelligentTiering configuration keyed by `id`. Validates `<Status>` ∈ {Enabled, Disabled} and `<Tiering><Days>` ≥ 90. Returns 200 OK.
+  - **Design:** Parse body → extract id from `<Id>` tag → persist to subdirectory. Router forwards body + id.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** Round-trip in `tests/stub_tests.rs::test_bucket_intelligent_tiering`.
+  - **Risk:** Low.
+- [x] DeleteBucketIntelligentTieringConfiguration (planned 2026-05-13)
+  - **Goal:** Remove a single IntelligentTiering configuration by `id`. Idempotent; 204.
+  - **Design:** `storage.delete_bucket_intelligent_tiering(bucket, id)` → 204. Router forwards id.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** DELETE→GET→404 in `tests/stub_tests.rs::test_bucket_intelligent_tiering`.
+  - **Risk:** Low.
+- [x] GetObjectLockConfiguration (planned 2026-05-13)
+  - **Goal:** Return bucket-level Object Lock configuration as `ObjectLockConfiguration` XML; emit `ObjectLockConfigurationNotFoundError` (404) when unset or when bucket was not created with `x-amz-bucket-object-lock-enabled: true`.
+  - **Design:** Read JSON from `<bucket>/bucket_object_lock.json` via `StorageEngine::get_bucket_object_lock`; render via `ObjectLockConfigurationXml`. On `NotFound` → 404 `ObjectLockConfigurationNotFoundError`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Prerequisites:** Bucket creation flag (`BucketMetadata.object_lock_enabled`) in `src/storage/core/types.rs`.
+  - **Tests:** `test_object_lock_bucket_level` in `tests/stub_tests.rs`.
+  - **Risk:** Medium — depends on create_bucket flag being wired first.
+- [x] PutObjectLockConfiguration (planned 2026-05-13)
+  - **Goal:** Set or update the default-retention rule for a bucket. Requires bucket to have been created with Object Lock enabled; returns 409 `InvalidBucketState` otherwise. Returns 200 OK on success.
+  - **Design:** Check `BucketMetadata.object_lock_enabled`; if false → 409. Parse `<ObjectLockConfiguration>` body → validate mode ∈ {GOVERNANCE, COMPLIANCE} and days/years presence → `storage.put_bucket_object_lock`. Router body-forwarding.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`, `src/storage/core/types.rs`.
+  - **Tests:** `test_object_lock_bucket_level` in `tests/stub_tests.rs`.
+  - **Risk:** Medium — see GetObjectLockConfiguration prerequisites.
+- [x] GetBucketMetricsConfiguration (planned 2026-05-13)
+  - **Goal:** Return a single Metrics configuration by `id` as `MetricsConfiguration` XML; 404 `NoSuchConfiguration` when not found.
+  - **Design:** Read JSON from `<bucket>/bucket_metrics/<sanitized_id>.json`. Router extracts `id` from `BucketGetQueryParams.id` (already present) and forwards it.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] PutBucketMetricsConfiguration (planned 2026-05-13)
+  - **Goal:** Accept and persist a Metrics configuration by `id`. Returns 200 OK.
+  - **Design:** Add `id` to `BucketPutQueryParams`; collect body → parse → `storage.put_bucket_metrics(bucket, id, cfg)`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] DeleteBucketMetricsConfiguration (planned 2026-05-13)
+  - **Goal:** Delete a single Metrics configuration by `id`. Idempotent; 204.
+  - **Design:** Add `id` to `BucketDeleteQueryParams`; `storage.delete_bucket_metrics(bucket, id)` → 204.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] ListBucketMetricsConfigurations (planned 2026-05-13)
+  - **Goal:** Return all Metrics configurations for a bucket as `ListMetricsConfigurationsResult` XML. Empty list is valid (200).
+  - **Design:** `storage.list_bucket_metrics(bucket)` reads `bucket_metrics/*.json`; serialize as list XML. Router: no id → list.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] GetBucketAnalyticsConfiguration (planned 2026-05-13)
+  - **Goal:** Return a single Analytics configuration by `id` as `AnalyticsConfiguration` XML; 404 `NoSuchConfiguration` when not found.
+  - **Design:** Read JSON from `<bucket>/bucket_analytics/<sanitized_id>.json`; serialize via `AnalyticsConfigXml`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] PutBucketAnalyticsConfiguration (planned 2026-05-13)
+  - **Goal:** Accept and persist an Analytics configuration by `id`. Returns 200 OK.
+  - **Design:** Add `id` to `BucketPutQueryParams`; parse body → `storage.put_bucket_analytics(bucket, id, cfg)`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] DeleteBucketAnalyticsConfiguration (planned 2026-05-13)
+  - **Goal:** Delete a single Analytics configuration by `id`. Idempotent; 204.
+  - **Design:** Add `id` to `BucketDeleteQueryParams`; `storage.delete_bucket_analytics(bucket, id)` → 204.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] ListBucketAnalyticsConfigurations (planned 2026-05-13)
+  - **Goal:** Return all Analytics configurations as `ListAnalyticsConfigurationsResult` XML. Empty list → 200.
+  - **Design:** `storage.list_bucket_analytics(bucket)` reads `bucket_analytics/*.json`; serialize.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] GetBucketInventoryConfiguration (planned 2026-05-13)
+  - **Goal:** Return a single Inventory configuration by `id` as `InventoryConfiguration` XML; 404 `NoSuchConfiguration` when not found.
+  - **Design:** Read JSON from `<bucket>/bucket_inventory/<sanitized_id>.json`; serialize via `InventoryConfigXml`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] PutBucketInventoryConfiguration (planned 2026-05-13)
+  - **Goal:** Accept and persist an Inventory configuration by `id`. Validates `schedule_frequency` ∈ {Daily, Weekly} and `included_object_versions` ∈ {All, Current}. Returns 200 OK.
+  - **Design:** Add `id` to `BucketPutQueryParams`; parse body → `storage.put_bucket_inventory(bucket, id, cfg)`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/api/utils.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] DeleteBucketInventoryConfiguration (planned 2026-05-13)
+  - **Goal:** Delete a single Inventory configuration by `id`. Idempotent; 204.
+  - **Design:** Add `id` to `BucketDeleteQueryParams`; `storage.delete_bucket_inventory(bucket, id)` → 204.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
+- [x] ListBucketInventoryConfigurations (planned 2026-05-13)
+  - **Goal:** Return all Inventory configurations as `ListInventoryConfigurationsResult` XML. Empty list → 200.
+  - **Design:** `storage.list_bucket_inventory(bucket)` reads `bucket_inventory/*.json`; serialize.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/core/bucket_config.rs`, `src/api/xml_responses.rs`.
+  - **Tests:** `test_metrics_analytics_inventory_id_keyed` in `tests/stub_tests.rs`.
+  - **Risk:** Low.
 
 ### Object operations
 - [x] ListObjectsV1
@@ -225,17 +476,69 @@ Legend: [x]=implemented, [ ]=not yet/verify, [~]=compat stub (returns fixed/NotI
 - [x] PostObject (multipart/form-data)
 - [x] Range requests
 - [x] Conditional headers (If-Match/If-None-Match/etc)
-- [~] GetObjectAcl
-- [~] PutObjectAcl
-- [~] ListObjectVersions
-- [~] RestoreObject
-- [~] GetObjectLegalHold
-- [~] PutObjectLegalHold
-- [~] GetObjectRetention
-- [~] PutObjectRetention
+- [x] GetObjectAcl
+  - **Goal:** Real storage read of `<bucket>/acl/<sanitized_key>.json`; fallback to FULL_CONTROL default if absent.
+  - **Design:** `StorageEngine::get_object_acl(bucket, key)` sidecar path mirrors `object_lock.rs` pattern. `head_object` existence check first.
+  - **Files:** `src/storage/core/bucket_acl.rs`, `src/api/handlers/functions/functions_4.rs`
+  - **Tests:** `tests/stub_tests_acl.rs::test_object_acl_default`, `test_object_acl_canned_public_read`, `test_object_acl_explicit_xml`
+  - **Risk:** Key sanitization must be consistent between put and get paths.
+- [x] PutObjectAcl
+  - **Goal:** Parse `x-amz-acl` header OR XML body; persist per-object ACL sidecar.
+  - **Design:** Same precedence logic as PutBucketAcl. Sidecar path `<bucket>/acl/<sanitize_key(key)>.json`. Router at L529–535 currently discards body — switch to body-forwarding. Handler gains `HeaderMap` + `Bytes` params.
+  - **Files:** `src/storage/core/bucket_acl.rs`, `src/api/utils.rs`, `src/api/handlers/functions/functions_4.rs`, `src/api/s3_router.rs`
+  - **Tests:** `test_object_acl_canned_public_read`, `test_object_acl_explicit_xml`, `test_object_acl_conflict`, `test_object_acl_missing`
+  - **Risk:** `put_object_acl` currently no-ops; router body discard means body was never received. Both must be fixed simultaneously.
+- [x] ListObjectVersions (planned 2026-05-11)
+  - **Goal:** Return real version IDs and delete markers using the versioning infrastructure; for non-versioned buckets fall through to synthetic version_id="null" behavior.
+  - **Design:** Call `state.storage.versioning_manager().list_all_versions(&bucket, prefix, max_keys)`; map `is_delete_marker==true` entries to `DeleteMarkerEntry`, others to `ObjectVersion` with real `version_id`. Honor `version_id_marker` and `key_marker` query params for pagination. If bucket is `Unversioned`, fall through to current `list_objects` + synthesize-null-version path. Located in `src/api/handlers/functions/select_parser.rs:264-323`.
+  - **Files:** `src/api/handlers/functions/select_parser.rs`.
+  - **Tests:** PUT Enabled, PUT two objects, ListObjectVersions → see two versions with real IDs; DELETE one → see delete marker; non-versioned bucket → see version_id="null" (backward compat).
+  - **Risk:** Moderate — pagination semantics (version_id_marker + key_marker) must be implemented correctly; backward-compat fallback for unversioned buckets is essential.
+- [x] RestoreObject
+  - **Goal:** Parse `<RestoreRequest>` body; call real `ArchivalManager::restore_object`; return 202 (new restore) or 200 (already active).
+  - **Design:** `ArchivalManager` is in-memory only (not in StorageEngine). Prerequisites: add `archive_manager: Arc<RwLock<ArchivalManager>>` to `StorageEngine`; add `archive_object(bucket, key, size)` + `get_archival_status(bucket, key)` StorageEngine methods; wire PutObject with `x-amz-storage-class: GLACIER|DEEP_ARCHIVE` to call archive_object. Router at L651–658 discards body — fix to collect and forward `Bytes`. Handler in `functions_2.rs` rewritten: parse `RestoreRequest{days, tier}`, peek archival status, dispatch to `archive_manager.write().restore_object()`. 409 `InvalidObjectState` when object not archived.
+  - **Files:** `src/storage/core/types.rs`, `src/storage/archival.rs` (read-only; no changes), `src/api/utils.rs`, `src/api/handlers/functions/functions_2.rs`, `src/api/s3_router.rs`, `src/api/handlers/functions/functions_1.rs` (PutObject GLACIER path)
+  - **Tests:** `tests/stub_tests_restore.rs::test_restore_object_not_archived`, `test_restore_request_invalid_xml`, `test_restore_tier_invalid`, `test_restore_object_archived` (PUT with GLACIER → POST restore → 202)
+  - **Risk:** `types.rs` is at 1965 lines — adding ArchivalManager field is ~5 LoC, watch threshold.
+- [x] GetObjectLegalHold (planned 2026-05-13)
+  - **Goal:** Return per-version legal-hold status as `<LegalHold><Status>ON|OFF</Status></LegalHold>` XML. Returns 404 when no legal-hold metadata exists for the specified version.
+  - **Design:** Resolve version (from `?versionId` or latest); read `<bucket>/object_lock/<sanitized_key>/<version_id>.json` via `ObjectLockManager::get`; render via `LegalHoldXml`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/object_lock.rs` (new), `src/api/xml_responses.rs`, `src/api/s3_router.rs`.
+  - **Prerequisites:** `ObjectLockManager` in `src/storage/object_lock.rs`; `versionId` in `ObjectQueryParams`.
+  - **Tests:** `test_object_lock_legal_hold_blocks_delete` in `tests/stub_tests.rs`.
+  - **Risk:** Medium — new sidecar storage pattern.
+- [x] PutObjectLegalHold (planned 2026-05-13)
+  - **Goal:** Set or clear legal hold on a specific object version. `<Status>ON</Status>` freezes deletion; `OFF` releases it. Returns 200 OK.
+  - **Design:** Parse `<LegalHold><Status>ON|OFF</Status></LegalHold>` → `ObjectLockManager::put_legal_hold(bucket, key, version_id, status)`. Writes/updates `<bucket>/object_lock/<key>/<version_id>.json`.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/object_lock.rs` (new), `src/api/utils.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_object_lock_legal_hold_blocks_delete` in `tests/stub_tests.rs`.
+  - **Risk:** Medium — delete enforcement in `delete_object` depends on this.
+- [x] GetObjectRetention (planned 2026-05-13)
+  - **Goal:** Return per-version retention metadata as `<Retention><Mode>…</Mode><RetainUntilDate>…</RetainUntilDate></Retention>` XML. 404 when no retention set.
+  - **Design:** `ObjectLockManager::get(bucket, key, version_id)` → render via `RetentionXml`. Date in ISO-8601 UTC.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/object_lock.rs` (new), `src/api/xml_responses.rs`, `src/api/s3_router.rs`.
+  - **Tests:** `test_object_lock_governance_with_bypass` + `test_object_lock_compliance_immutable` in `tests/stub_tests.rs`.
+  - **Risk:** Medium.
+- [x] PutObjectRetention (planned 2026-05-13)
+  - **Goal:** Set or extend object retention. COMPLIANCE retention cannot be shortened even with bypass. GOVERNANCE retention requires `x-amz-bypass-governance-retention: true` to override. Returns 200 OK.
+  - **Design:** Parse body → validate mode + date → `ObjectLockManager::put_retention(bucket, key, version_id, mode, until, bypass)`. If COMPLIANCE + shortening → 403 AccessDenied. If GOVERNANCE override without bypass → 403.
+  - **Files:** `src/api/bucket_stubs.rs`, `src/storage/object_lock.rs` (new), `src/api/utils.rs`, `src/api/s3_router.rs`.
+  - **Prerequisites:** `delete_object` in `core.rs` must consult `ObjectLockManager::is_protected`.
+  - **Tests:** `test_object_lock_governance_with_bypass` + `test_object_lock_compliance_immutable` in `tests/stub_tests.rs`.
+  - **Risk:** Medium — enforcement semantics must be exactly correct.
 - [x] SelectObjectContent
-- [~] GetObjectTorrent
-- [~] WriteGetObjectResponse
+- [x] GetObjectTorrent
+  - **Goal:** Intentionally 501 — deprecated and removed by AWS in 2025. BitTorrent retrieval is not part of the current S3 API.
+  - **Design:** Handler already returns 501 `NotImplemented`. Updated message: "GetObjectTorrent was deprecated by AWS and is no longer part of the S3 API. rs3gw does not support BitTorrent retrieval."
+  - **Files:** `src/api/bucket_stubs.rs`
+  - **Tests:** None — 501 is the terminal state; existing smoke suite verifies it doesn't panic.
+  - **Risk:** None — AWS removed this endpoint. Marking [x] prevents future /ultra from attempting implementation.
+- [x] WriteGetObjectResponse
+  - **Goal:** Intentionally 501 — Lambda Object Lambda only. Only valid when invoked from inside an S3 Object Lambda function; rs3gw is an S3 gateway, not Object Lambda.
+  - **Design:** Handler already returns 501 `NotImplemented`. Updated message: "WriteGetObjectResponse is only valid when invoked from inside an S3 Object Lambda function. rs3gw is an S3 gateway, not Object Lambda."
+  - **Files:** `src/api/bucket_stubs.rs`
+  - **Tests:** None — 501 is the terminal state.
+  - **Risk:** None. Marking [x] prevents future /ultra from attempting implementation.
 
 ### Multipart upload
 - [x] CreateMultipartUpload
@@ -455,7 +758,7 @@ See src/cluster/README.md for env vars and topology notes.
 
 ## Roadmap
 
-### v0.2.0 (Usability + completeness) -- CURRENT
+### v0.2.1 (Usability + completeness) -- CURRENT
 - [x] Clarify and document all stubbed S3 APIs
 - [x] Improve error messages and compatibility codes
 - [x] Add `rs3ctl` workflows (if present) for common admin tasks
@@ -995,3 +1298,44 @@ See src/cluster/README.md for env vars and topology notes.
 - [ ] Verify error code mapping #065
 - [ ] Verify error code mapping #066
 - [ ] Verify error code mapping #067
+
+### Session 5 (2026-05-14)
+- [x] Phase 0: splitrs `src/storage/core/types.rs` (blocker; 1998→directory module)
+  - **Goal:** Split the 1998-line file to stay under 2000-line ceiling
+  - **Files:** `src/storage/core/types/` (directory module with base_types, types_3, types_4, etc.)
+  - **Status:** Complete — 937/937 tests pass, largest file 1570 lines
+- [x] SSE-S3 sidecar struct + storage I/O
+  - **Goal:** Per-object SSE sidecar with atomic write, re-encrypt extension points for Session 6
+  - **Files:** `src/storage/core/sse.rs` (new)
+- [x] AppState wires EncryptionService
+  - **Files:** `src/lib.rs`
+- [x] `resolve_sse` helper
+  - **Files:** `src/api/sse.rs` (new)
+- [x] PutObject honors `x-amz-server-side-encryption: AES256`
+  - **Files:** `src/api/handlers/functions/functions_3.rs`
+- [x] PutObject inherits bucket-default encryption from `bucket_encryption.json`
+  - **Files:** `src/api/handlers/functions/functions_3.rs` (via resolve_sse)
+- [x] PutObject returns 501 NotImplemented for `aws:kms` / `aws:kms:dsse`
+  - **Files:** `src/api/sse.rs`
+- [x] GetObject / HeadObject emit `x-amz-server-side-encryption: AES256` + decrypt body
+  - **Files:** `src/api/handlers/functions/select_parser.rs`
+- [x] GetObject range request on SSE: full-decrypt-then-slice
+  - **Files:** `src/api/handlers/functions/select_parser.rs`; TODO(session-6): chunked AEAD
+- [x] `checksum_validation` interop with SSE (skip validation for SSE objects)
+  - **Files:** `src/storage/core/types/types_3.rs`
+- [x] CopyObject SSE 4-way matrix
+  - **Files:** `src/api/handlers/functions/functions_4.rs`
+- [x] CORS preflight OPTIONS handler with rule matcher
+  - **Files:** `src/api/cors.rs` (new), `src/api/s3_router.rs`
+- [x] Simple-request CORS response headers via tower middleware
+  - **Files:** `src/api/cors_middleware.rs` (new), `src/main.rs`
+- [x] tests/stub_tests_sse.rs
+- [x] tests/stub_tests_cors.rs
+
+### Session 6 (deferred)
+- [x] SSE-C (customer-provided key) request path
+- [x] SSE-KMS envelope encryption with KMS key resolution
+- [x] Streaming AEAD for seekable ranged GET on SSE objects
+- [x] CreateMultipartUpload + UploadPart SSE inheritance
+- [x] Persistent KEK storage (replace process-local LocalKeyProvider)
+- [x] bucket-owner-read / bucket-owner-full-control object-ACL grant expansion

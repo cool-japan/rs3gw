@@ -51,6 +51,9 @@ pub enum EncryptionError {
 
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 // ============================================================================
@@ -90,6 +93,19 @@ impl EncryptionAlgorithm {
 // Encrypted Data Structure
 // ============================================================================
 
+/// Per-chunk encryption metadata for v2 (chunked) format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkInfo {
+    pub nonce: Vec<u8>,
+    pub plaintext_len: u64,
+}
+
+/// GCM authentication tag length in bytes (fixed for AES-256-GCM).
+const GCM_TAG_LEN: usize = 16;
+
+/// Chunk size for v2 (chunked) SSE format: 5 MiB.
+pub const SSE_CHUNK_SIZE: usize = 5 * 1024 * 1024;
+
 /// Encrypted data with associated metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedData {
@@ -103,10 +119,16 @@ pub struct EncryptedData {
     pub dek_nonce: Vec<u8>,
     /// Encrypted payload
     pub ciphertext: Vec<u8>,
-    /// Nonce/IV used for payload encryption
+    /// Nonce/IV used for payload encryption (empty for v2 chunked format)
     pub payload_nonce: Vec<u8>,
     /// Optional additional authenticated data (AAD)
     pub aad: Option<Vec<u8>>,
+    /// Per-chunk nonces for v2 (chunked) format. Empty = v1 single-shot.
+    #[serde(default)]
+    pub chunks: Vec<ChunkInfo>,
+    /// Chunk size used during encryption (0 = v1 single-shot).
+    #[serde(default)]
+    pub chunk_size: u64,
 }
 
 // ============================================================================
@@ -164,6 +186,73 @@ impl LocalKeyProvider {
             keys: Arc::new(tokio::sync::RwLock::new(keys)),
             default_key_id: key_id,
         }
+    }
+
+    /// Create a key provider that persists the KEK to disk.
+    ///
+    /// - If `kek_path` already exists, the key is loaded from the JSON file
+    ///   `{"kek_id":"master-key-v1","key_base64":"<base64>"}`.
+    /// - If `kek_path` does not exist, a fresh random 32-byte key is generated,
+    ///   written to the file atomically (write-tmp + rename), and then returned.
+    ///
+    /// Parent directories are created automatically. All errors propagate as
+    /// [`EncryptionError`] — no `unwrap()` is used.
+    pub fn new_with_persistence(kek_path: std::path::PathBuf) -> Result<Self, EncryptionError> {
+        /// On-disk representation of the KEK file.
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct KekFile {
+            kek_id: String,
+            key_base64: String,
+        }
+
+        const KEY_ID: &str = "master-key-v1";
+
+        let master_key: Vec<u8> = if kek_path.exists() {
+            // Load existing key.
+            let raw = std::fs::read(&kek_path)?;
+            let record: KekFile = serde_json::from_slice(&raw)
+                .map_err(|e| EncryptionError::SerializationError(e.to_string()))?;
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(&record.key_base64)
+                .map_err(|e| {
+                    EncryptionError::SerializationError(format!("base64 decode error: {}", e))
+                })?
+        } else {
+            // Generate a new random key and persist it atomically.
+            let mut key = vec![0u8; 32];
+            getrandom::fill(&mut key).map_err(|e| {
+                EncryptionError::KeyProviderError(format!("Failed to generate random key: {}", e))
+            })?;
+
+            // Ensure parent directory exists.
+            if let Some(parent) = kek_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            use base64::Engine as _;
+            let record = KekFile {
+                kek_id: KEY_ID.to_string(),
+                key_base64: base64::engine::general_purpose::STANDARD.encode(&key),
+            };
+            let json = serde_json::to_vec(&record)
+                .map_err(|e| EncryptionError::SerializationError(e.to_string()))?;
+
+            // Write atomically: write to a sibling tmp file, then rename.
+            let tmp_path = kek_path.with_extension("tmp");
+            std::fs::write(&tmp_path, &json)?;
+            std::fs::rename(&tmp_path, &kek_path)?;
+
+            key
+        };
+
+        let mut keys = HashMap::new();
+        keys.insert(KEY_ID.to_string(), master_key);
+
+        Ok(Self {
+            keys: Arc::new(tokio::sync::RwLock::new(keys)),
+            default_key_id: KEY_ID.to_string(),
+        })
     }
 }
 
@@ -449,15 +538,27 @@ impl EncryptionService {
             ciphertext,
             payload_nonce,
             aad: aad.map(|a| a.to_vec()),
+            chunks: vec![],
+            chunk_size: 0,
         })
     }
 
-    /// Decrypt data using envelope encryption
+    /// Decrypt data using envelope encryption.
     ///
-    /// 1. Decrypt the DEK using the KEK
-    /// 2. Decrypt the ciphertext using the DEK
-    /// 3. Return the plaintext
+    /// Dispatches to v1 (single-shot) or v2 (chunked) based on whether `chunks` is empty.
     pub async fn decrypt(&self, encrypted: &EncryptedData) -> Result<Vec<u8>, EncryptionError> {
+        if encrypted.chunks.is_empty() {
+            self.decrypt_single_shot(encrypted).await
+        } else {
+            self.decrypt_chunked_all(encrypted).await
+        }
+    }
+
+    /// v1 single-shot decryption (existing path, now private).
+    async fn decrypt_single_shot(
+        &self,
+        encrypted: &EncryptedData,
+    ) -> Result<Vec<u8>, EncryptionError> {
         // Step 1: Get KEK and decrypt DEK
         let kek = self.key_provider.get_kek(&encrypted.kek_id).await?;
 
@@ -490,6 +591,36 @@ impl EncryptionService {
         };
 
         Ok(plaintext)
+    }
+
+    /// v2 chunked decryption: decrypt all chunks in order and concatenate.
+    async fn decrypt_chunked_all(
+        &self,
+        encrypted: &EncryptedData,
+    ) -> Result<Vec<u8>, EncryptionError> {
+        // Decrypt DEK with KEK.
+        let kek = self.key_provider.get_kek(&encrypted.kek_id).await?;
+        let dek =
+            self.decrypt_aes256gcm(&encrypted.encrypted_dek, &kek, &encrypted.dek_nonce, None)?;
+
+        let aad_prefix = encrypted.aad.as_deref().unwrap_or(&[]);
+        let mut result: Vec<u8> = Vec::new();
+        let mut offset: usize = 0;
+
+        for (i, chunk_info) in encrypted.chunks.iter().enumerate() {
+            let ct_len = chunk_info.plaintext_len as usize + GCM_TAG_LEN;
+            let chunk_ct = encrypted
+                .ciphertext
+                .get(offset..offset + ct_len)
+                .ok_or(EncryptionError::DecryptionFailed)?;
+            let chunk_aad = build_chunk_aad(aad_prefix, i);
+            let chunk_pt =
+                self.decrypt_aes256gcm(chunk_ct, &dek, &chunk_info.nonce, Some(&chunk_aad))?;
+            result.extend_from_slice(&chunk_pt);
+            offset += ct_len;
+        }
+
+        Ok(result)
     }
 
     /// Re-encrypt data with a new KEK (for key rotation)
@@ -539,7 +670,287 @@ impl EncryptionService {
             ciphertext: encrypted.ciphertext.clone(),
             payload_nonce: encrypted.payload_nonce.clone(),
             aad: encrypted.aad.clone(),
+            chunks: encrypted.chunks.clone(),
+            chunk_size: encrypted.chunk_size,
         })
+    }
+
+    /// Encrypt with customer-provided key (SSE-C).
+    ///
+    /// Generates a random DEK, encrypts it with `customer_key` (AES-256-GCM),
+    /// then encrypts `plaintext` with the DEK. The raw customer key is never
+    /// stored — only the DEK encrypted with it is persisted in the sidecar.
+    pub async fn encrypt_with_customer_key(
+        &self,
+        plaintext: &[u8],
+        customer_key: &[u8; 32],
+        aad: Option<&[u8]>,
+    ) -> Result<EncryptedData, EncryptionError> {
+        let algorithm = EncryptionAlgorithm::Aes256Gcm;
+
+        // Step 1: Generate a random DEK.
+        let dek = self.generate_dek(algorithm)?;
+
+        // Step 2: Encrypt plaintext with the DEK.
+        let payload_nonce = self.generate_nonce(algorithm)?;
+        let ciphertext = self.encrypt_aes256gcm(plaintext, &dek, &payload_nonce, aad)?;
+
+        // Step 3: Encrypt the DEK with the customer key (customer key acts as KEK).
+        let dek_nonce = self.generate_nonce(algorithm)?;
+        let encrypted_dek = self.encrypt_aes256gcm(&dek, customer_key, &dek_nonce, None)?;
+
+        Ok(EncryptedData {
+            algorithm,
+            encrypted_dek,
+            // No server KEK is involved — store an empty string to distinguish from SSE-S3.
+            kek_id: String::new(),
+            dek_nonce,
+            ciphertext,
+            payload_nonce,
+            aad: aad.map(|a| a.to_vec()),
+            chunks: vec![],
+            chunk_size: 0,
+        })
+    }
+
+    /// Decrypt data encrypted with a customer-provided key (SSE-C).
+    ///
+    /// Decrypts the DEK using `customer_key`, then decrypts the payload.
+    /// If the customer key is wrong the DEK decryption will fail with
+    /// `EncryptionError::DecryptionFailed`.
+    pub async fn decrypt_with_customer_key(
+        &self,
+        encrypted: &EncryptedData,
+        customer_key: &[u8; 32],
+    ) -> Result<Vec<u8>, EncryptionError> {
+        // Step 1: Decrypt the DEK using the customer key.
+        let dek = self.decrypt_aes256gcm(
+            &encrypted.encrypted_dek,
+            customer_key,
+            &encrypted.dek_nonce,
+            None,
+        )?;
+
+        // Step 2: Decrypt the payload using the DEK.
+        let plaintext = self.decrypt_aes256gcm(
+            &encrypted.ciphertext,
+            &dek,
+            &encrypted.payload_nonce,
+            encrypted.aad.as_deref(),
+        )?;
+
+        Ok(plaintext)
+    }
+
+    /// Encrypt using a specific named KEK (for SSE-KMS key selection).
+    ///
+    /// Identical to `encrypt_with_algorithm` but targets `kek_id` instead of
+    /// calling `default_kek_id()`. The `EncryptedData.kek_id` field is set to
+    /// `kek_id.to_string()`.
+    pub async fn encrypt_with_kek_id(
+        &self,
+        plaintext: &[u8],
+        kek_id: &str,
+        aad: Option<&[u8]>,
+    ) -> Result<EncryptedData, EncryptionError> {
+        let algorithm = self.default_algorithm;
+
+        // Step 1: Generate DEK.
+        let dek = self.generate_dek(algorithm)?;
+
+        // Step 2: Encrypt plaintext with DEK.
+        let payload_nonce = self.generate_nonce(algorithm)?;
+        let ciphertext = match algorithm {
+            EncryptionAlgorithm::Aes256Gcm => {
+                self.encrypt_aes256gcm(plaintext, &dek, &payload_nonce, aad)?
+            }
+            EncryptionAlgorithm::ChaCha20Poly1305 => {
+                self.encrypt_chacha20poly1305(plaintext, &dek, &payload_nonce, aad)?
+            }
+        };
+
+        // Step 3: Get the named KEK and encrypt DEK with it.
+        let kek = self.key_provider.get_kek(kek_id).await?;
+        let dek_nonce = self.generate_nonce(algorithm)?;
+        let encrypted_dek = match algorithm {
+            EncryptionAlgorithm::Aes256Gcm => {
+                self.encrypt_aes256gcm(&dek, &kek, &dek_nonce, None)?
+            }
+            EncryptionAlgorithm::ChaCha20Poly1305 => {
+                self.encrypt_chacha20poly1305(&dek, &kek, &dek_nonce, None)?
+            }
+        };
+
+        Ok(EncryptedData {
+            algorithm,
+            encrypted_dek,
+            kek_id: kek_id.to_string(),
+            dek_nonce,
+            ciphertext,
+            payload_nonce,
+            aad: aad.map(|a| a.to_vec()),
+            chunks: vec![],
+            chunk_size: 0,
+        })
+    }
+
+    /// Resolve a KMS key ID: if `requested` is `None`, returns `default_kek_id()`.
+    ///
+    /// If `requested` is `Some`, validates that the key exists in the key store
+    /// and returns it.  Returns `Err(KeyNotFound)` if the requested ID is absent.
+    pub async fn resolve_kms_key_id(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<String, EncryptionError> {
+        match requested {
+            None => self.key_provider.default_kek_id().await,
+            Some(id) => {
+                // Validate the key exists — get_kek returns Err(KeyNotFound) if absent.
+                self.key_provider.get_kek(id).await?;
+                Ok(id.to_string())
+            }
+        }
+    }
+
+    /// Encrypt using chunked AES-256-GCM (v2 format) with the default KEK.
+    ///
+    /// Each [`SSE_CHUNK_SIZE`]-byte block is independently encrypted.
+    /// AAD per chunk: `{aad_prefix}/chunk/{i}` for tamper evidence.
+    pub async fn encrypt_chunked(
+        &self,
+        plaintext: &[u8],
+        aad: Option<&[u8]>,
+    ) -> Result<EncryptedData, EncryptionError> {
+        let kek_id = self.key_provider.default_kek_id().await?;
+        self.encrypt_chunked_internal(plaintext, &kek_id, aad).await
+    }
+
+    /// Chunked encryption targeting a specific named KEK (for SSE-KMS).
+    pub async fn encrypt_chunked_with_kek_id(
+        &self,
+        plaintext: &[u8],
+        kek_id: &str,
+        aad: Option<&[u8]>,
+    ) -> Result<EncryptedData, EncryptionError> {
+        // Validate the key exists.
+        self.key_provider.get_kek(kek_id).await?;
+        self.encrypt_chunked_internal(plaintext, kek_id, aad).await
+    }
+
+    /// Internal chunked encryption implementation.
+    async fn encrypt_chunked_internal(
+        &self,
+        plaintext: &[u8],
+        kek_id: &str,
+        aad: Option<&[u8]>,
+    ) -> Result<EncryptedData, EncryptionError> {
+        let algorithm = EncryptionAlgorithm::Aes256Gcm;
+
+        // Generate random DEK (32 bytes).
+        let dek = self.generate_dek(algorithm)?;
+
+        // Encrypt DEK with KEK.
+        let kek = self.key_provider.get_kek(kek_id).await?;
+        let dek_nonce = self.generate_nonce(algorithm)?;
+        let encrypted_dek = self.encrypt_aes256gcm(&dek, &kek, &dek_nonce, None)?;
+
+        let aad_prefix = aad.unwrap_or(&[]);
+        let mut ciphertext: Vec<u8> = Vec::new();
+        let mut chunks: Vec<ChunkInfo> = Vec::new();
+
+        for (i, chunk_plain) in plaintext.chunks(SSE_CHUNK_SIZE).enumerate() {
+            let nonce = self.generate_nonce(algorithm)?;
+            let chunk_aad = build_chunk_aad(aad_prefix, i);
+            let chunk_ct = self.encrypt_aes256gcm(chunk_plain, &dek, &nonce, Some(&chunk_aad))?;
+            chunks.push(ChunkInfo {
+                nonce,
+                plaintext_len: chunk_plain.len() as u64,
+            });
+            ciphertext.extend_from_slice(&chunk_ct);
+        }
+
+        Ok(EncryptedData {
+            algorithm,
+            encrypted_dek,
+            kek_id: kek_id.to_string(),
+            dek_nonce,
+            ciphertext,
+            // v2: no single payload_nonce — per-chunk nonces are in `chunks`.
+            payload_nonce: vec![],
+            aad: aad.map(|a| a.to_vec()),
+            chunks,
+            chunk_size: SSE_CHUNK_SIZE as u64,
+        })
+    }
+
+    /// Decrypt only the chunks covering `[range_start, range_end)` bytes (exclusive end).
+    ///
+    /// `ciphertext_bytes` is the full concatenated chunk ciphertext from disk.
+    /// `aad_prefix` is the same prefix used during encryption (bucket/key path).
+    pub async fn decrypt_chunked_range(
+        &self,
+        sidecar_kek_id: &str,
+        sidecar_encrypted_dek: &[u8],
+        sidecar_dek_nonce: &[u8],
+        sidecar_chunk_size: u64,
+        sidecar_chunks: &[crate::storage::SidecarChunk],
+        ciphertext_bytes: &[u8],
+        range_start: u64,
+        range_end: u64, // exclusive
+        aad_prefix: &[u8],
+    ) -> Result<Vec<u8>, EncryptionError> {
+        if sidecar_chunk_size == 0 || sidecar_chunks.is_empty() {
+            return Err(EncryptionError::DecryptionFailed);
+        }
+        if range_start >= range_end {
+            return Err(EncryptionError::DecryptionFailed);
+        }
+
+        // Decrypt DEK.
+        let kek = self.key_provider.get_kek(sidecar_kek_id).await?;
+        let dek = self.decrypt_aes256gcm(sidecar_encrypted_dek, &kek, sidecar_dek_nonce, None)?;
+
+        let first_chunk = (range_start / sidecar_chunk_size) as usize;
+        let last_chunk = ((range_end - 1) / sidecar_chunk_size) as usize;
+
+        // Compute byte offsets of each chunk in the ciphertext file.
+        // Each chunk occupies (plaintext_len + GCM_TAG_LEN) bytes on disk.
+        let mut file_offsets: Vec<usize> = Vec::with_capacity(sidecar_chunks.len() + 1);
+        let mut acc: usize = 0;
+        for chunk in sidecar_chunks.iter() {
+            file_offsets.push(acc);
+            acc += chunk.plaintext_len as usize + GCM_TAG_LEN;
+        }
+        file_offsets.push(acc); // sentinel end
+
+        // Decrypt only the required chunks.
+        let mut plaintext_parts: Vec<u8> = Vec::new();
+        for idx in first_chunk..=last_chunk {
+            let chunk = sidecar_chunks
+                .get(idx)
+                .ok_or(EncryptionError::DecryptionFailed)?;
+            let file_start = *file_offsets
+                .get(idx)
+                .ok_or(EncryptionError::DecryptionFailed)?;
+            let file_end = file_start + chunk.plaintext_len as usize + GCM_TAG_LEN;
+            let chunk_ct = ciphertext_bytes
+                .get(file_start..file_end)
+                .ok_or(EncryptionError::DecryptionFailed)?;
+            let chunk_aad = build_chunk_aad(aad_prefix, idx);
+            let chunk_pt =
+                self.decrypt_aes256gcm(chunk_ct, &dek, &chunk.nonce, Some(&chunk_aad))?;
+            plaintext_parts.extend_from_slice(&chunk_pt);
+        }
+
+        // Slice the concatenated plaintext to the exact requested byte range.
+        let first_chunk_start_byte = first_chunk as u64 * sidecar_chunk_size;
+        let local_start = (range_start - first_chunk_start_byte) as usize;
+        let local_end = (range_end - first_chunk_start_byte) as usize;
+        let result = plaintext_parts
+            .get(local_start..local_end)
+            .ok_or(EncryptionError::DecryptionFailed)?
+            .to_vec();
+        Ok(result)
     }
 
     /// Encrypt bytes and return as Bytes
@@ -556,6 +967,18 @@ impl EncryptionService {
             .map_err(|e| EncryptionError::SerializationError(e.to_string()))?;
         let plaintext = self.decrypt(&encrypted).await?;
         Ok(Bytes::from(plaintext))
+    }
+}
+
+/// Build the per-chunk AAD bytes: `{prefix}/chunk/{i}` (or `chunk/{i}` if prefix is empty).
+fn build_chunk_aad(prefix: &[u8], chunk_index: usize) -> Vec<u8> {
+    if prefix.is_empty() {
+        format!("chunk/{}", chunk_index).into_bytes()
+    } else {
+        let mut aad = prefix.to_vec();
+        aad.extend_from_slice(b"/chunk/");
+        aad.extend_from_slice(chunk_index.to_string().as_bytes());
+        aad
     }
 }
 

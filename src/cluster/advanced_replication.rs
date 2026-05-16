@@ -727,7 +727,7 @@ impl AdvancedReplicationManager {
 
     /// Compress batch data using zstd
     fn compress_batch(&self, data: &[u8], level: i32) -> AdvancedReplicationResult<Vec<u8>> {
-        zstd::bulk::compress(data, level).map_err(|e| {
+        oxiarc_zstd::encode_all(data, level).map_err(|e| {
             AdvancedReplicationError::WanOptimization(format!("Compression failed: {}", e))
         })
     }

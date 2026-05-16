@@ -81,6 +81,7 @@
 //! included in canonical form.
 
 use bytes::{Bytes, BytesMut};
+use hmac::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::pin::Pin;

@@ -35,7 +35,7 @@ fn bench_sha256_hashing(c: &mut Criterion) {
 
 /// Benchmark: HMAC-SHA256 for signature verification
 fn bench_hmac_sha256(c: &mut Criterion) {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;

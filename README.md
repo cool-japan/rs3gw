@@ -2,7 +2,7 @@
 
 **High-Performance Enterprise Object Storage Gateway**
 
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 
 rs3gw (Rust S3 Gateway) is an ultra-high-performance, enterprise-grade object storage gateway designed for AI/ML workloads, scientific computing (HPC), and large-scale data management. Built on Rust's zero-cost abstractions and powered by [scirs2-io](https://crates.io/crates/scirs2-io), it delivers S3-compatible access with predictable low latency, comprehensive observability, and advanced enterprise features.
@@ -946,23 +946,18 @@ We welcome contributions! Please see our development process:
 
 ## Project Summary
 
-- **Version**: 0.2.0 (2026-03-16)
+- **Version**: 0.2.1 (2026-05-16)
 - **Language**: Rust (100% Pure Rust default features)
-- **Lines of Code**: ~69,137 Rust SLoC (74,667 total across all languages)
-- **Modules**: 193 Rust files across 300 total files
-- **Tests**: 874 tests (865 lib + integration, 9 doc tests), 0 failures
+- **Lines of Code**: ~82,146 Rust SLoC (96,865 total Rust lines across 214 files)
+- **Modules**: 214 Rust files across 318 total files
+- **Tests**: 961 tests (952 lib + integration, 9 doc tests), 0 failures
 - **Quality**: 0 clippy warnings, 0 rustdoc errors
 - **Dependencies**: Carefully selected for performance and security (all up-to-date)
 - **Policy Compliance**: 100% SCIRS2 compliant
 
 ## 📜 License
 
-This project is dual-licensed under:
-
-- [MIT License](LICENSE-MIT)
-- [Apache License, Version 2.0](LICENSE-APACHE)
-
-Choose the license that best fits your use case.
+Licensed under the [Apache License, Version 2.0](LICENSE).
 
 ## 🙏 Acknowledgments
 
@@ -975,7 +970,7 @@ Choose the license that best fits your use case.
 
 ## Known Limitations
 
-The following are known gaps in the current release (0.2.0). They are documented here to set accurate expectations for production deployments.
+The following are known gaps in the current release (0.2.1). They are documented here to set accurate expectations for production deployments.
 
 - **SigV4 chunked streaming HMAC**: Per-chunk HMAC verification for `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and `UNSIGNED-PAYLOAD` is not implemented. The request body is accepted when these payload types are declared; only the canonical request signature is verified. Full per-chunk HMAC is planned for a future release.
 - **Object Lock / WORM**: Object Lock API endpoints (`GetObjectRetention`, `PutObjectRetention`, `GetObjectLegalHold`, `PutObjectLegalHold`) are registered but return "Object Lock must be enabled" errors. Retention and legal-hold constraints are not enforced.

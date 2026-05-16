@@ -126,6 +126,9 @@ pub async fn setup_test_server() -> (Client, TempDir, TestServer) {
             std::collections::HashMap::new(),
         )),
         in_flight: rs3gw::InFlightTracker::new(),
+        encryption: std::sync::Arc::new(rs3gw::storage::encryption::EncryptionService::new(
+            std::sync::Arc::new(rs3gw::storage::encryption::LocalKeyProvider::default()),
+        )),
     };
 
     let app = axum::Router::new()
@@ -252,6 +255,9 @@ pub async fn setup_test_server_with_auth() -> (Client, TempDir, TestServer) {
             std::collections::HashMap::new(),
         )),
         in_flight: rs3gw::InFlightTracker::new(),
+        encryption: std::sync::Arc::new(rs3gw::storage::encryption::EncryptionService::new(
+            std::sync::Arc::new(rs3gw::storage::encryption::LocalKeyProvider::default()),
+        )),
     };
 
     let app = axum::Router::new()
@@ -268,6 +274,109 @@ pub async fn setup_test_server_with_auth() -> (Client, TempDir, TestServer) {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create the S3 client
+    let client = create_s3_client(addr).await;
+
+    let server = TestServer {
+        addr,
+        base_url: format!("http://{}", addr),
+        _handle: server_handle,
+    };
+
+    (client, temp_dir, server)
+}
+
+/// Start a test server that includes the CORS simple-request middleware.
+///
+/// This mirrors the production `main.rs` setup for simple (non-OPTIONS) CORS
+/// header injection via [`rs3gw::api::cors_middleware::cors_simple_request`].
+pub async fn setup_test_server_with_cors_middleware() -> (Client, TempDir, TestServer) {
+    init_tracing();
+    let temp_dir = TempDir::new().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let storage_root = temp_dir.path().to_path_buf();
+    let storage = Arc::new(rs3gw::storage::StorageEngine::new(storage_root.clone()).unwrap());
+    let metrics_handle = get_metrics_handle();
+    let config = rs3gw::Config {
+        bind_addr: addr,
+        storage_root,
+        default_bucket: "default".to_string(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        compression: rs3gw::storage::CompressionMode::None,
+        request_timeout_secs: 0,
+        max_concurrent_requests: 0,
+        tls: rs3gw::TlsConfig::default(),
+        connection_pool: rs3gw::ConnectionPoolConfig::default(),
+        cluster: rs3gw::cluster::ClusterConfig::default(),
+        dedup: rs3gw::storage::DedupConfig::disabled(),
+        zerocopy: rs3gw::storage::ZeroCopyConfig::default(),
+        select_cache: rs3gw::SelectCacheConfig::default(),
+        multipart_retention_hours: 168,
+        fsync: false,
+    };
+    let preprocessing_path = temp_dir.path().join("preprocessing");
+    let preprocessing_manager = std::sync::Arc::new(
+        rs3gw::storage::preprocessing::PreprocessingManager::new(preprocessing_path),
+    );
+    let predictive_analytics = std::sync::Arc::new(rs3gw::observability::PredictiveAnalytics::new(
+        10_000,
+        0.023,
+        0.09,
+        0.0004,
+        1_000_000_000_000,
+    ));
+    let metrics_tracker = std::sync::Arc::new(rs3gw::observability::MetricsTracker::new());
+    let select_result_cache =
+        std::sync::Arc::new(rs3gw::api::SelectResultCache::new(100, 10 * 1024 * 1024));
+    let query_intelligence = std::sync::Arc::new(rs3gw::api::QueryIntelligence::new());
+    let training_path = temp_dir.path().join("training");
+    let training_manager = std::sync::Arc::new(rs3gw::storage::TrainingManager::new(training_path));
+
+    let state = rs3gw::AppState {
+        config,
+        storage,
+        metrics_handle,
+        cache: None,
+        throttle: None,
+        quota: None,
+        event_broadcaster: rs3gw::api::EventBroadcaster::new(),
+        query_plan_cache: None,
+        select_result_cache,
+        query_intelligence,
+        advanced_replication: None,
+        preprocessing_manager,
+        predictive_analytics,
+        metrics_tracker,
+        training_manager,
+        start_time: std::time::Instant::now(),
+        verifier: None,
+        auth_failure_counts: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        in_flight: rs3gw::InFlightTracker::new(),
+        encryption: std::sync::Arc::new(rs3gw::storage::encryption::EncryptionService::new(
+            std::sync::Arc::new(rs3gw::storage::encryption::LocalKeyProvider::default()),
+        )),
+    };
+
+    let app = axum::Router::new()
+        .merge(rs3gw::api::s3_router::routes())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rs3gw::api::cors_middleware::cors_simple_request,
+        ))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .with_state(state);
+
+    let server_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     let client = create_s3_client(addr).await;
 
     let server = TestServer {

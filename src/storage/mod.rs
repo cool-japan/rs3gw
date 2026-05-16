@@ -22,6 +22,7 @@ pub mod ml_cache;
 pub mod ml_models;
 pub mod model_registry;
 pub mod object_lambda;
+pub mod object_lock;
 pub mod preprocessing;
 pub mod self_healing;
 pub mod storage_class;

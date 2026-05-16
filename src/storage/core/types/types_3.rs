@@ -1,53 +1,6 @@
-//! Storage engine core types and implementation.
+//! Auto-generated module
 //!
-//! # On-disk layout
-//!
-//! ```text
-//! <root>/
-//!   <bucket>/
-//!     objects/<encoded_key>              # object data (may be zstd/lz4 compressed)
-//!     metadata/<encoded_key>.json        # JSON: ObjectMetadata (schema_version=1)
-//!     sci_metadata/<encoded_key>.json    # JSON: SciMetadata (HPC/AI fields)
-//!     tags/<encoded_key>.json            # JSON: ObjectTagging
-//!     bucket_tags.json                   # JSON: bucket-level tags
-//!     bucket_policy.json                 # JSON: bucket access policy
-//!     multipart/<upload_id>/
-//!       metadata.json                    # JSON: MultipartMetadata
-//!       part-00001, part-00002, ...      # raw part data files
-//! ```
-//!
-//! ## Key encoding
-//!
-//! S3 keys that end with `/` (directory-placeholder objects) cannot be stored as
-//! a file with a trailing slash on most filesystems.  The final empty component is
-//! replaced with the sentinel string `__DIROBJ__` so such keys round-trip cleanly.
-//!
-//! ## Atomic-rename durability
-//!
-//! Both object data (`put_object`) and metadata (`save_metadata`) are written to a
-//! temporary file (`<final_path>.tmp.<nanos>`) and then `rename`d into place.
-//! This guarantees that readers never observe a partial write.
-//!
-//! ## fsync flag
-//!
-//! When `fsync_enabled` is `true`, `file.sync_all()` is called on the temp file
-//! before the rename.  This trades throughput for extra crash durability and is
-//! disabled by default (it can be enabled via the `RS3GW_FSYNC=true` environment
-//! variable or the `--fsync` CLI flag).
-//!
-//! ## schema_version
-//!
-//! Every `metadata/<key>.json` file contains `"schema_version": 1`.  Future
-//! breaking changes to the metadata schema must increment this value so that older
-//! binaries can detect and refuse to load incompatible data.
-//!
-//! ## Checksum validation
-//!
-//! When `checksum_validation` is enabled (via `RS3GW_CHECKSUM_VALIDATION=true`),
-//! `get_object` reads the full object body and verifies the stored SHA-256 digest
-//! (base64-encoded in `__checksum_value__` metadata) before streaming the data to
-//! the caller.  A mismatch returns `StorageError::Internal` with a descriptive
-//! message.
+//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 pub use crate::storage::versioning::{
     BucketVersionIndex, BucketVersioningConfig, ObjectVersionIndex, ObjectVersionMetadata,
@@ -57,111 +10,22 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::stream::{Stream, StreamExt};
-use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
-/// Object tagging
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ObjectTagging {
-    pub tags: HashMap<String, String>,
-}
-#[derive(Debug, Clone, Default)]
-pub struct QuotaConfig {
-    pub max_storage_bytes: u64,
-    pub max_objects: u64,
-}
-pub struct QuotaManager {
-    config: QuotaConfig,
-    usage: Arc<RwLock<HashMap<String, BucketQuota>>>,
-}
-impl QuotaManager {
-    pub async fn new(config: QuotaConfig) -> Self {
-        Self {
-            config,
-            usage: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-    pub async fn check_quota(
-        &self,
-        bucket: &str,
-        additional_bytes: u64,
-    ) -> Result<(), StorageError> {
-        if self.config.max_storage_bytes == 0 {
-            return Ok(());
-        }
-        let usage = self.usage.read().await;
-        let current = usage.get(bucket).cloned().unwrap_or_default();
-        if current.storage_bytes + additional_bytes > self.config.max_storage_bytes {
-            return Err(StorageError::Io(std::io::Error::other("Quota exceeded")));
-        }
-        Ok(())
-    }
-    pub async fn add_object(&self, bucket: &str, size: u64) {
-        let mut usage = self.usage.write().await;
-        let quota = usage.entry(bucket.to_string()).or_default();
-        quota.storage_bytes += size;
-        quota.object_count += 1;
-    }
-    pub async fn remove_object(&self, bucket: &str, size: u64) {
-        let mut usage = self.usage.write().await;
-        if let Some(quota) = usage.get_mut(bucket) {
-            quota.storage_bytes = quota.storage_bytes.saturating_sub(size);
-            quota.object_count = quota.object_count.saturating_sub(1);
-        }
-    }
-}
-/// Storage statistics
-#[derive(Debug, Clone)]
-pub struct StorageStats {
-    pub bucket_count: u64,
-    pub object_count: u64,
-    pub total_size_bytes: u64,
-}
-/// Part metadata for multipart uploads
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PartMetadata {
-    pub part_number: u32,
-    pub etag: String,
-    pub size: u64,
-    pub last_modified: DateTime<Utc>,
-}
-#[derive(Debug, Clone, Default)]
-struct BucketQuota {
-    storage_bytes: u64,
-    object_count: u64,
-}
-#[derive(Clone)]
-struct CacheEntry {
-    data: Bytes,
-    metadata: ObjectMetadata,
-    cached_at: DateTime<Utc>,
-}
-fn default_schema_version() -> u32 {
-    1
-}
+use super::base_types::{
+    BucketLockMetadata, BucketMetadata, ByteRange, CorsConfig, EncryptionConfig, MultipartMetadata,
+    MultipartUpload, ObjectMetadata, PartMetadata, SciMetadata, StorageError,
+};
+use super::types_4::{CompressionMode, ObjectTagging, StorageStats};
 
-/// Object metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObjectMetadata {
-    pub key: String,
-    pub size: u64,
-    pub etag: String,
-    pub last_modified: DateTime<Utc>,
-    pub content_type: String,
-    pub metadata: HashMap<String, String>,
-    /// Schema version for forward-compatibility. Always 1 for current format.
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-}
 pub struct StorageEngine {
     root: PathBuf,
     compression: CompressionMode,
@@ -171,18 +35,31 @@ pub struct StorageEngine {
     /// When true, SHA-256 checksum is verified on every `get_object` call
     /// for objects that carry `__checksum_algo__` / `__checksum_value__` metadata.
     checksum_validation: bool,
+    /// Manages per-version Object Lock (LegalHold + Retention) sidecar files.
+    pub object_lock_manager: Arc<crate::storage::object_lock::ObjectLockManager>,
+    /// In-memory archival state for Glacier/DeepArchive objects.
+    archive_manager: Arc<RwLock<crate::storage::archival::ArchivalManager>>,
 }
 impl StorageEngine {
     /// Create a new storage engine at the given root path
     pub fn new(root: PathBuf) -> Result<Self, StorageError> {
         std::fs::create_dir_all(&root)?;
         let versioning_manager = Arc::new(VersioningManager::new(root.clone()));
+        let object_lock_manager = Arc::new(crate::storage::object_lock::ObjectLockManager::new(
+            root.clone(),
+        ));
+        let archive_manager =
+            Arc::new(RwLock::new(crate::storage::archival::ArchivalManager::new(
+                crate::storage::archival::ArchivalPolicy::default(),
+            )));
         Ok(Self {
             root,
             compression: CompressionMode::None,
             versioning_manager,
             fsync_enabled: false,
             checksum_validation: false,
+            object_lock_manager,
+            archive_manager,
         })
     }
     /// Set compression mode
@@ -195,7 +72,6 @@ impl StorageEngine {
         self.fsync_enabled = enabled;
         self
     }
-
     /// Enable or disable SHA-256 checksum validation on read.
     ///
     /// When enabled, `get_object` verifies the stored checksum (if present in
@@ -206,28 +82,34 @@ impl StorageEngine {
         self.checksum_validation = enabled;
         self
     }
-
     /// Decompress raw bytes if a compression algorithm is specified.
     ///
     /// Returns the original bytes unchanged when `algo` is `None`.
     fn maybe_decompress(raw: &[u8], algo: Option<&str>) -> Result<Bytes, StorageError> {
         match algo {
             Some("zstd") => {
-                let decompressed = zstd::decode_all(raw).map_err(|e| {
+                let decompressed = oxiarc_zstd::decode_all(raw).map_err(|e| {
                     StorageError::Internal(format!("zstd decompression failed: {e}"))
                 })?;
                 Ok(Bytes::from(decompressed))
             }
             Some("lz4") => {
-                let decompressed = lz4_flex::decompress_size_prepended(raw).map_err(|e| {
-                    StorageError::Internal(format!("lz4 decompression failed: {e}"))
+                if raw.len() < 4 {
+                    return Err(StorageError::Internal("lz4 data too short".to_string()));
+                }
+                let size_bytes: [u8; 4] = raw[..4].try_into().map_err(|_| {
+                    StorageError::Internal("lz4 size prefix read failed".to_string())
                 })?;
+                let max_output = u32::from_le_bytes(size_bytes) as usize;
+                let decompressed =
+                    oxiarc_lz4::decompress_block(&raw[4..], max_output).map_err(|e| {
+                        StorageError::Internal(format!("lz4 decompression failed: {e}"))
+                    })?;
                 Ok(Bytes::from(decompressed))
             }
             _ => Ok(Bytes::copy_from_slice(raw)),
         }
     }
-
     /// Validate an object key for safety.
     ///
     /// Rejects:
@@ -255,7 +137,6 @@ impl StorageEngine {
     fn bucket_path(&self, bucket: &str) -> PathBuf {
         self.root.join(bucket)
     }
-
     /// Encode an S3 object key into a filesystem-safe path component.
     ///
     /// S3 keys may end with `/` (used as directory-placeholder objects). On most
@@ -269,9 +150,6 @@ impl StorageEngine {
     ///   `"a/b/c/"` → `"a/b/c/__DIROBJ__"`
     ///   `"plain-key"` → `"plain-key"` (unchanged)
     fn sanitize_key_for_fs(key: &str) -> String {
-        // Strip any leading slashes to prevent absolute-path injection when
-        // the sanitised key is joined onto a PathBuf.  S3 treats "/foo" and
-        // "foo" as the same key for filesystem storage purposes.
         let key = key.trim_start_matches('/');
         if key.ends_with('/') {
             format!("{}__DIROBJ__", key)
@@ -279,8 +157,7 @@ impl StorageEngine {
             key.to_string()
         }
     }
-
-    fn object_path(&self, bucket: &str, key: &str) -> PathBuf {
+    pub(crate) fn object_path(&self, bucket: &str, key: &str) -> PathBuf {
         self.bucket_path(bucket)
             .join("objects")
             .join(Self::sanitize_key_for_fs(key))
@@ -355,6 +232,7 @@ impl StorageEngine {
         fs::create_dir_all(path.join("sci_metadata")).await?;
         fs::create_dir_all(path.join("tags")).await?;
         fs::create_dir_all(path.join("multipart")).await?;
+        fs::create_dir_all(path.join("sse")).await?;
         info!("Created bucket: {}", bucket);
         Ok(())
     }
@@ -415,15 +293,10 @@ impl StorageEngine {
         max_keys: usize,
         start_after: Option<&str>,
     ) -> Result<(Vec<ObjectMetadata>, Vec<String>, bool), StorageError> {
-        // Load ALL objects in the bucket/prefix so that start_after filtering
-        // works correctly regardless of filesystem enumeration order.
         let (mut objects, common_prefixes) = self
             .list_objects(bucket, prefix, delimiter, usize::MAX)
             .await?;
-
-        // Sort by key so lexicographic ordering and pagination are deterministic.
         objects.sort_by(|a, b| a.key.cmp(&b.key));
-
         if let Some(marker) = start_after {
             objects.retain(|obj| obj.key.as_str() > marker);
         }
@@ -485,9 +358,6 @@ impl StorageEngine {
                     )
                     .await?;
                 } else {
-                    // Reverse the filesystem key encoding: `folder/__DIROBJ__`
-                    // was stored as a directory-placeholder object with logical
-                    // key `folder/`.
                     let logical_key = if key.ends_with("/__DIROBJ__") {
                         key[..key.len() - "__DIROBJ__".len()].to_string()
                     } else {
@@ -535,11 +405,13 @@ impl StorageEngine {
     > {
         let metadata = self.head_object(bucket, key).await?;
         let path = self.object_path(bucket, key);
-
-        // Determine if the stored data is compressed.
         let compression_algo = metadata.metadata.get("__compression__").cloned();
-
-        if self.checksum_validation {
+        // D2: SSE objects store ciphertext on disk; the stored sha256 covers the plaintext.
+        // Skipping disk-level checksum validation for SSE objects here — the decrypt step in
+        // the API layer provides data integrity via AEAD authentication tags.
+        // TODO(session-6): decrypt-then-hash for full D2 compliance.
+        let is_sse = metadata.metadata.contains_key("__sse_algorithm__");
+        if self.checksum_validation && !is_sse {
             if let (Some(algo), Some(stored_value)) = (
                 metadata.metadata.get("__checksum_algo__"),
                 metadata.metadata.get("__checksum_value__"),
@@ -553,7 +425,6 @@ impl StorageEngine {
                             "checksum mismatch: object data corrupted".to_string(),
                         ));
                     }
-                    // Checksum verified — decompress if needed, then stream.
                     let decompressed = Self::maybe_decompress(&raw, compression_algo.as_deref())?;
                     let stream = futures::stream::iter(std::iter::once(Ok::<Bytes, StorageError>(
                         decompressed,
@@ -562,8 +433,6 @@ impl StorageEngine {
                 }
             }
         }
-
-        // If data is compressed, read into memory and decompress.
         if compression_algo.is_some() {
             let raw = fs::read(&path).await?;
             let decompressed = Self::maybe_decompress(&raw, compression_algo.as_deref())?;
@@ -571,7 +440,6 @@ impl StorageEngine {
                 futures::stream::iter(std::iter::once(Ok::<Bytes, StorageError>(decompressed)));
             return Ok((metadata, Box::new(stream)));
         }
-
         let file = File::open(&path).await?;
         let stream = tokio_util::io::ReaderStream::new(file);
         let stream = stream.map(|result| result.map_err(StorageError::from));
@@ -617,9 +485,7 @@ impl StorageEngine {
         metadata: HashMap<String, String>,
         data: Bytes,
     ) -> Result<String, StorageError> {
-        // Validate key before any filesystem operations.
         Self::validate_key(key)?;
-
         if !self.bucket_exists(bucket).await? {
             return Err(StorageError::BucketNotFound);
         }
@@ -627,12 +493,10 @@ impl StorageEngine {
         if let Some(parent) = object_path.parent() {
             fs::create_dir_all(parent).await?;
         }
-
-        // Compress data if compression is enabled.
         let original_size = data.len() as u64;
         let (write_data, metadata) = match self.compression {
             CompressionMode::Zstd(level) => {
-                let compressed = zstd::encode_all(data.as_ref(), level)
+                let compressed = oxiarc_zstd::encode_all(data.as_ref(), level)
                     .map_err(|e| StorageError::Internal(format!("zstd compression failed: {e}")))?;
                 let compressed_size = compressed.len() as u64;
                 crate::metrics::record_compression("zstd", original_size, compressed_size);
@@ -642,7 +506,11 @@ impl StorageEngine {
                 (Bytes::from(compressed), meta)
             }
             CompressionMode::Lz4 => {
-                let compressed = lz4_flex::compress_prepend_size(data.as_ref());
+                let compressed_raw = oxiarc_lz4::compress_block(data.as_ref())
+                    .map_err(|e| StorageError::Internal(format!("lz4 compression failed: {e}")))?;
+                let mut compressed = Vec::with_capacity(4 + compressed_raw.len());
+                compressed.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                compressed.extend_from_slice(&compressed_raw);
                 let compressed_size = compressed.len() as u64;
                 crate::metrics::record_compression("lz4", original_size, compressed_size);
                 let mut meta = metadata;
@@ -652,8 +520,6 @@ impl StorageEngine {
             }
             CompressionMode::None => (data.clone(), metadata),
         };
-
-        // Build a temp path alongside the final destination.
         let tmp_path = {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -661,8 +527,6 @@ impl StorageEngine {
                 .as_nanos();
             PathBuf::from(format!("{}.tmp.{}", object_path.display(), nanos))
         };
-
-        // Write to temp file, cleaning up on any error.
         let write_result: Result<(), StorageError> = async {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -670,7 +534,6 @@ impl StorageEngine {
                 .truncate(true)
                 .open(&tmp_path)
                 .await?;
-
             file.write_all(&write_data).await.map_err(|e| {
                 if e.kind() == std::io::ErrorKind::StorageFull {
                     StorageError::InsufficientStorage
@@ -678,7 +541,6 @@ impl StorageEngine {
                     StorageError::Io(e)
                 }
             })?;
-
             if self.fsync_enabled {
                 file.sync_all().await.map_err(|e| {
                     if e.kind() == std::io::ErrorKind::StorageFull {
@@ -691,19 +553,15 @@ impl StorageEngine {
             Ok(())
         }
         .await;
-
         if let Err(e) = write_result {
             let _ = fs::remove_file(&tmp_path).await;
             return Err(e);
         }
-
-        // Atomic rename: old content is never partially visible.
         if let Err(e) = fs::rename(&tmp_path, &object_path).await {
             let _ = fs::remove_file(&tmp_path).await;
             return Err(StorageError::Io(e));
         }
-
-        let etag = format!("{:x}", sha2::Sha256::digest(&data));
+        let etag = hex::encode(sha2::Sha256::digest(&data));
         let obj_metadata = ObjectMetadata {
             key: key.to_string(),
             size: original_size,
@@ -714,8 +572,6 @@ impl StorageEngine {
             schema_version: 1,
         };
         self.save_metadata(bucket, key, &obj_metadata).await?;
-
-        // When versioning is enabled (or suspended), record this new object version.
         if let Ok(versioning_cfg) = self.versioning_manager.get_config(bucket).await {
             match versioning_cfg.status {
                 crate::storage::VersioningStatus::Enabled
@@ -736,12 +592,10 @@ impl StorageEngine {
                 crate::storage::VersioningStatus::Unversioned => {}
             }
         }
-
         crate::metrics::record_object_size(bucket, data.len() as u64);
         info!("Put object: {}/{} ({} bytes)", bucket, key, data.len());
         Ok(etag)
     }
-
     /// Store an object whose data is already written to a temporary file on disk.
     ///
     /// This is used by the streaming PUT handler: chunks are written to
@@ -758,23 +612,18 @@ impl StorageEngine {
         etag: String,
     ) -> Result<String, StorageError> {
         Self::validate_key(key)?;
-
         if !self.bucket_exists(bucket).await? {
             return Err(StorageError::BucketNotFound);
         }
-
         let object_path = self.object_path(bucket, key);
         if let Some(parent) = object_path.parent() {
             fs::create_dir_all(parent).await?;
         }
-
-        // Handle compression: if enabled, read the temp file, compress,
-        // and write the compressed data back before the atomic rename.
         let mut metadata = metadata;
         match self.compression {
             CompressionMode::Zstd(level) => {
                 let raw_data = fs::read(temp_path).await?;
-                let compressed = zstd::encode_all(raw_data.as_slice(), level)
+                let compressed = oxiarc_zstd::encode_all(raw_data.as_slice(), level)
                     .map_err(|e| StorageError::Internal(format!("zstd compression failed: {e}")))?;
                 let compressed_size = compressed.len() as u64;
                 crate::metrics::record_compression("zstd", size, compressed_size);
@@ -784,7 +633,11 @@ impl StorageEngine {
             }
             CompressionMode::Lz4 => {
                 let raw_data = fs::read(temp_path).await?;
-                let compressed = lz4_flex::compress_prepend_size(&raw_data);
+                let compressed_raw = oxiarc_lz4::compress_block(&raw_data)
+                    .map_err(|e| StorageError::Internal(format!("lz4 compression failed: {e}")))?;
+                let mut compressed = Vec::with_capacity(4 + compressed_raw.len());
+                compressed.extend_from_slice(&(raw_data.len() as u32).to_le_bytes());
+                compressed.extend_from_slice(&compressed_raw);
                 let compressed_size = compressed.len() as u64;
                 crate::metrics::record_compression("lz4", size, compressed_size);
                 metadata.insert("__compression__".to_string(), "lz4".to_string());
@@ -793,13 +646,10 @@ impl StorageEngine {
             }
             CompressionMode::None => {}
         }
-
-        // Atomic rename from temp path to final object path.
         if let Err(e) = fs::rename(temp_path, &object_path).await {
             let _ = fs::remove_file(temp_path).await;
             return Err(StorageError::Io(e));
         }
-
         let ct = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
         let obj_metadata = ObjectMetadata {
             key: key.to_string(),
@@ -811,8 +661,6 @@ impl StorageEngine {
             schema_version: 1,
         };
         self.save_metadata(bucket, key, &obj_metadata).await?;
-
-        // Record versioning if enabled.
         if let Ok(versioning_cfg) = self.versioning_manager.get_config(bucket).await {
             match versioning_cfg.status {
                 crate::storage::VersioningStatus::Enabled
@@ -833,12 +681,10 @@ impl StorageEngine {
                 crate::storage::VersioningStatus::Unversioned => {}
             }
         }
-
         crate::metrics::record_object_size(bucket, size);
         info!("Put object from path: {}/{} ({} bytes)", bucket, key, size);
         Ok(etag)
     }
-
     /// Delete an object
     pub async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
         if !self.bucket_exists(bucket).await? {
@@ -850,12 +696,9 @@ impl StorageEngine {
         let tagging_path = self.tagging_path(bucket, key);
         if object_path.exists() {
             fs::remove_file(&object_path).await?;
-            // Clean up empty parent directories within the objects sub-tree to
-            // avoid leaving orphan directories when keys contain `/` separators.
             let objects_root = self.bucket_path(bucket).join("objects");
             if let Some(mut parent) = object_path.parent() {
                 while parent != objects_root {
-                    // Attempt to remove the directory — this is a no-op if not empty.
                     if fs::remove_dir(parent).await.is_err() {
                         break;
                     }
@@ -873,7 +716,6 @@ impl StorageEngine {
         }
         if metadata_path.exists() {
             let _ = fs::remove_file(&metadata_path).await;
-            // Clean up empty parent directories within the metadata sub-tree.
             let metadata_root = self.bucket_path(bucket).join("metadata");
             if let Some(mut parent) = metadata_path.parent() {
                 while parent != metadata_root {
@@ -960,15 +802,11 @@ impl StorageEngine {
         let data = serde_json::to_vec_pretty(metadata).map_err(|e| {
             StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })?;
-
-        // Atomic write: write to tmp file then rename into place so that readers
-        // never observe a partially-written metadata file.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let tmp_path = PathBuf::from(format!("{}.tmp.{}", path.display(), nanos));
-
         let write_result: Result<(), StorageError> = async {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -980,17 +818,14 @@ impl StorageEngine {
             Ok(())
         }
         .await;
-
         if let Err(e) = write_result {
             let _ = fs::remove_file(&tmp_path).await;
             return Err(e);
         }
-
         if let Err(e) = fs::rename(&tmp_path, &path).await {
             let _ = fs::remove_file(&tmp_path).await;
             return Err(StorageError::Io(e));
         }
-
         Ok(())
     }
     /// Get scientific metadata
@@ -1156,6 +991,101 @@ impl StorageEngine {
         }
         Ok(())
     }
+    fn bucket_encryption_path(&self, bucket: &str) -> PathBuf {
+        self.bucket_path(bucket).join("bucket_encryption.json")
+    }
+    fn bucket_cors_path(&self, bucket: &str) -> PathBuf {
+        self.bucket_path(bucket).join("bucket_cors.json")
+    }
+    /// Get bucket encryption configuration
+    pub async fn get_bucket_encryption(
+        &self,
+        bucket: &str,
+    ) -> Result<EncryptionConfig, StorageError> {
+        if !self.bucket_exists(bucket).await? {
+            return Err(StorageError::BucketNotFound);
+        }
+        let path = self.bucket_encryption_path(bucket);
+        if !path.exists() {
+            return Err(StorageError::NotFound(format!(
+                "Encryption configuration for '{}' not found",
+                bucket
+            )));
+        }
+        let data = fs::read(&path).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    }
+    /// Put bucket encryption configuration
+    pub async fn put_bucket_encryption(
+        &self,
+        bucket: &str,
+        cfg: &EncryptionConfig,
+    ) -> Result<(), StorageError> {
+        if !self.bucket_exists(bucket).await? {
+            return Err(StorageError::BucketNotFound);
+        }
+        let path = self.bucket_encryption_path(bucket);
+        let data = serde_json::to_vec_pretty(cfg).map_err(|e| {
+            StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        fs::write(&path, data).await?;
+        Ok(())
+    }
+    /// Delete bucket encryption configuration
+    pub async fn delete_bucket_encryption(&self, bucket: &str) -> Result<(), StorageError> {
+        if !self.bucket_exists(bucket).await? {
+            return Err(StorageError::BucketNotFound);
+        }
+        let path = self.bucket_encryption_path(bucket);
+        if path.exists() {
+            fs::remove_file(&path).await?;
+        }
+        Ok(())
+    }
+    /// Get bucket CORS configuration
+    pub async fn get_bucket_cors(&self, bucket: &str) -> Result<CorsConfig, StorageError> {
+        if !self.bucket_exists(bucket).await? {
+            return Err(StorageError::BucketNotFound);
+        }
+        let path = self.bucket_cors_path(bucket);
+        if !path.exists() {
+            return Err(StorageError::NotFound(format!(
+                "CORS configuration for '{}' not found",
+                bucket
+            )));
+        }
+        let data = fs::read(&path).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    }
+    /// Put bucket CORS configuration
+    pub async fn put_bucket_cors(
+        &self,
+        bucket: &str,
+        cfg: &CorsConfig,
+    ) -> Result<(), StorageError> {
+        if !self.bucket_exists(bucket).await? {
+            return Err(StorageError::BucketNotFound);
+        }
+        let path = self.bucket_cors_path(bucket);
+        let data = serde_json::to_vec_pretty(cfg).map_err(|e| {
+            StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        fs::write(&path, data).await?;
+        Ok(())
+    }
+    /// Delete bucket CORS configuration
+    pub async fn delete_bucket_cors(&self, bucket: &str) -> Result<(), StorageError> {
+        if !self.bucket_exists(bucket).await? {
+            return Err(StorageError::BucketNotFound);
+        }
+        let path = self.bucket_cors_path(bucket);
+        if path.exists() {
+            fs::remove_file(&path).await?;
+        }
+        Ok(())
+    }
     /// Create a multipart upload
     pub async fn create_multipart_upload(
         &self,
@@ -1208,7 +1138,7 @@ impl StorageEngine {
         }
         let part_path = self.multipart_part_path(bucket, upload_id, part_number);
         fs::write(&part_path, &data).await?;
-        let etag = format!("{:x}", sha2::Sha256::digest(&data));
+        let etag = hex::encode(sha2::Sha256::digest(&data));
         let metadata_data = fs::read(&metadata_path).await?;
         let mut multipart_metadata: MultipartMetadata = serde_json::from_slice(&metadata_data)
             .map_err(|e| {
@@ -1314,7 +1244,7 @@ impl StorageEngine {
         }
         output_file.sync_all().await?;
         let final_data = fs::read(&object_path).await?;
-        let etag = format!("{:x}", sha2::Sha256::digest(&final_data));
+        let etag = hex::encode(sha2::Sha256::digest(&final_data));
         let obj_metadata = ObjectMetadata {
             key: key.to_string(),
             size: total_size,
@@ -1421,7 +1351,6 @@ impl StorageEngine {
         retention_hours: u64,
     ) -> Result<u64, StorageError> {
         let cutoff = Utc::now() - chrono::Duration::hours(retention_hours as i64);
-
         let buckets: Vec<String> = match bucket {
             Some(b) => {
                 if !self.bucket_exists(b).await? {
@@ -1436,20 +1365,16 @@ impl StorageEngine {
                 .map(|m| m.name)
                 .collect(),
         };
-
         let mut removed: u64 = 0;
-
         for bucket_name in &buckets {
             let multipart_dir = self.bucket_path(bucket_name).join("multipart");
             if !multipart_dir.exists() {
                 continue;
             }
-
             let mut entries = match fs::read_dir(&multipart_dir).await {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let upload_id = entry.file_name().to_string_lossy().to_string();
                 let metadata_path = self.multipart_metadata_path(bucket_name, &upload_id);
@@ -1476,10 +1401,8 @@ impl StorageEngine {
                 }
             }
         }
-
         Ok(removed)
     }
-
     /// Enable versioning for a bucket
     pub async fn enable_bucket_versioning(&self, bucket: &str) -> Result<(), StorageError> {
         if !self.bucket_exists(bucket).await? {
@@ -1535,246 +1458,73 @@ impl StorageEngine {
             .get_version(bucket, key, version_id)
             .await
     }
-}
-/// Byte range for partial object reads
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ByteRange {
-    pub start: u64,
-    pub end: u64,
-}
-impl ByteRange {
-    /// Parse a Range header value (e.g., "bytes=0-1023")
-    pub fn parse(range_str: &str, file_size: u64) -> Result<Self, StorageError> {
-        let range_str = range_str.trim();
-        if !range_str.starts_with("bytes=") {
-            return Err(StorageError::InvalidRange);
-        }
-        let range_part = &range_str[6..];
-        if let Some(stripped) = range_part.strip_prefix('-') {
-            let suffix: u64 = stripped.parse().map_err(|_| StorageError::InvalidRange)?;
-            let start = file_size.saturating_sub(suffix);
-            Ok(ByteRange {
-                start,
-                end: file_size - 1,
-            })
-        } else {
-            let parts: Vec<&str> = range_part.split('-').collect();
-            if parts.len() != 2 {
-                return Err(StorageError::InvalidRange);
-            }
-            let start: u64 = parts[0].parse().map_err(|_| StorageError::InvalidRange)?;
-            let end = if parts[1].is_empty() {
-                file_size - 1
-            } else {
-                parts[1]
-                    .parse::<u64>()
-                    .map_err(|_| StorageError::InvalidRange)?
-            };
-            if start > end || start >= file_size {
-                return Err(StorageError::InvalidRange);
-            }
-            Ok(ByteRange {
-                start,
-                end: end.min(file_size - 1),
-            })
-        }
+    fn bucket_lock_metadata_path(&self, bucket: &str) -> PathBuf {
+        self.bucket_path(bucket).join("bucket_lock_metadata.json")
     }
-    /// Get the length of the range
-    pub fn length(&self) -> u64 {
-        self.end - self.start + 1
+    /// Read the Object Lock enabled flag for a bucket.
+    ///
+    /// Returns a default (disabled) struct when the file does not exist.
+    pub async fn read_bucket_lock_metadata(
+        &self,
+        bucket: &str,
+    ) -> Result<BucketLockMetadata, StorageError> {
+        let path = self.bucket_lock_metadata_path(bucket);
+        if !path.exists() {
+            return Ok(BucketLockMetadata::default());
+        }
+        let data = fs::read(&path).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    }
+    /// Persist the Object Lock enabled flag for a bucket.
+    pub async fn write_bucket_lock_metadata(
+        &self,
+        bucket: &str,
+        meta: &BucketLockMetadata,
+    ) -> Result<(), StorageError> {
+        let data = serde_json::to_vec_pretty(meta).map_err(|e| {
+            StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        fs::write(self.bucket_lock_metadata_path(bucket), data).await?;
+        Ok(())
     }
 }
-/// Scientific metadata for HPC/AI workloads
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SciMetadata {
-    pub dataset_name: Option<String>,
-    pub experiment_id: Option<String>,
-    pub model_version: Option<String>,
-    pub checkpoint_epoch: Option<u64>,
-    pub tensor_shape: Option<Vec<u64>>,
-    pub dtype: Option<String>,
-    pub framework: Option<String>,
-    pub custom_fields: HashMap<String, String>,
-}
-impl SciMetadata {
-    /// Convert scientific metadata to S3 metadata headers
-    pub fn to_s3_metadata(&self) -> HashMap<String, String> {
-        let mut meta = HashMap::new();
-        if let Some(ref name) = self.dataset_name {
-            meta.insert("sci-dataset-name".to_string(), name.clone());
-        }
-        if let Some(ref id) = self.experiment_id {
-            meta.insert("sci-experiment-id".to_string(), id.clone());
-        }
-        if let Some(ref version) = self.model_version {
-            meta.insert("sci-model-version".to_string(), version.clone());
-        }
-        if let Some(epoch) = self.checkpoint_epoch {
-            meta.insert("sci-checkpoint-epoch".to_string(), epoch.to_string());
-        }
-        if let Some(ref shape) = self.tensor_shape {
-            meta.insert(
-                "sci-tensor-shape".to_string(),
-                shape
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-        }
-        if let Some(ref dtype) = self.dtype {
-            meta.insert("sci-dtype".to_string(), dtype.clone());
-        }
-        if let Some(ref framework) = self.framework {
-            meta.insert("sci-framework".to_string(), framework.clone());
-        }
-        for (k, v) in &self.custom_fields {
-            meta.insert(format!("sci-{}", k), v.clone());
-        }
-        meta
+impl StorageEngine {
+    /// Archive an object (fire-and-forget; called after successful PutObject with GLACIER/DEEP_ARCHIVE).
+    pub async fn archive_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        size: u64,
+    ) -> Result<String, StorageError> {
+        self.archive_manager
+            .write()
+            .await
+            .archive_object(bucket, key, size)
+            .await
     }
-}
-/// Multipart upload info
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultipartUpload {
-    pub key: String,
-    pub upload_id: String,
-    pub initiated: DateTime<Utc>,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum CompressionMode {
-    #[default]
-    None,
-    Zstd(i32),
-    Lz4,
-}
-#[derive(Debug, Clone)]
-pub struct CacheConfig {
-    pub max_size_bytes: u64,
-    pub max_objects: usize,
-    pub ttl_secs: u64,
-}
-impl CacheConfig {
-    pub fn with_max_size_mb(mut self, mb: u64) -> Self {
-        self.max_size_bytes = mb * 1024 * 1024;
-        self
+    /// Get the current archival status for an object, or `None` if not tracked.
+    pub async fn get_archival_status(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Option<crate::storage::archival::ArchivalStatus> {
+        self.archive_manager
+            .read()
+            .await
+            .get_status(bucket, key)
+            .cloned()
     }
-    pub fn with_max_objects(mut self, max: usize) -> Self {
-        self.max_objects = max;
-        self
-    }
-    pub fn with_ttl_secs(mut self, ttl: u64) -> Self {
-        self.ttl_secs = ttl;
-        self
-    }
-}
-/// Bucket metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BucketMetadata {
-    pub name: String,
-    pub creation_date: DateTime<Utc>,
-}
-/// Multipart upload metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MultipartMetadata {
-    pub bucket: String,
-    pub key: String,
-    pub upload_id: String,
-    pub content_type: String,
-    pub metadata: HashMap<String, String>,
-    pub initiated: DateTime<Utc>,
-    pub parts: HashMap<u32, PartMetadata>,
-}
-/// Simple LRU cache for object data
-pub struct CacheManager {
-    config: CacheConfig,
-    cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
-}
-impl CacheManager {
-    pub fn new(config: CacheConfig) -> Self {
-        Self {
-            config,
-            cache: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-    pub async fn get(&self, bucket: &str, key: &str) -> Option<(ObjectMetadata, Bytes)> {
-        let cache_key = format!("{}/{}", bucket, key);
-        let cache = self.cache.read().await;
-        if let Some(entry) = cache.get(&cache_key) {
-            let age = Utc::now().signed_duration_since(entry.cached_at);
-            if age.num_seconds() < self.config.ttl_secs as i64 {
-                debug!("Cache hit: {}", cache_key);
-                return Some((entry.metadata.clone(), entry.data.clone()));
-            }
-        }
-        None
-    }
-    pub async fn put(&self, bucket: &str, key: &str, metadata: ObjectMetadata, data: Bytes) {
-        if data.len() as u64 > self.config.max_size_bytes {
-            return;
-        }
-        let cache_key = format!("{}/{}", bucket, key);
-        let mut cache = self.cache.write().await;
-        if cache.len() >= self.config.max_objects {
-            cache.clear();
-        }
-        cache.insert(
-            cache_key,
-            CacheEntry {
-                data,
-                metadata,
-                cached_at: Utc::now(),
-            },
-        );
-    }
-    pub async fn invalidate(&self, bucket: &str, key: &str) {
-        let cache_key = format!("{}/{}", bucket, key);
-        let mut cache = self.cache.write().await;
-        cache.remove(&cache_key);
-    }
-}
-#[derive(Error, Debug)]
-pub enum StorageError {
-    #[error("Object not found: {0}")]
-    NotFound(String),
-    #[error("Bucket not found")]
-    BucketNotFound,
-    #[error("Bucket already exists")]
-    BucketAlreadyExists,
-    #[error("Bucket not empty")]
-    BucketNotEmpty,
-    #[error("Access denied")]
-    AccessDenied,
-    #[error("Invalid bucket name: {0}")]
-    InvalidBucketName(String),
-    #[error("Too many buckets")]
-    TooManyBuckets,
-    #[error("Invalid range")]
-    InvalidRange,
-    #[error("Multipart upload not found")]
-    MultipartNotFound,
-    #[error("Invalid part number")]
-    InvalidPartNumber,
-    #[error("Invalid part: {0}")]
-    InvalidPart(String),
-    #[error("Internal error: {0}")]
-    Internal(String),
-    #[error("I/O error: {0}")]
-    Io(std::io::Error),
-    /// Returned when an object key contains path traversal sequences or null bytes.
-    #[error("Invalid key: {0}")]
-    InvalidKey(String),
-    /// Returned when the underlying filesystem has no space left (ENOSPC).
-    #[error("Insufficient storage: no space left on device")]
-    InsufficientStorage,
-}
-
-impl From<std::io::Error> for StorageError {
-    fn from(e: std::io::Error) -> Self {
-        match e.kind() {
-            std::io::ErrorKind::PermissionDenied => StorageError::AccessDenied,
-            std::io::ErrorKind::StorageFull => StorageError::InsufficientStorage,
-            _ => StorageError::Io(e),
-        }
+    /// Initiate restore of an archived object; delegates to `ArchivalManager::restore_object`.
+    pub async fn archive_object_restore(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<String, StorageError> {
+        self.archive_manager
+            .write()
+            .await
+            .restore_object(bucket, key)
+            .await
     }
 }

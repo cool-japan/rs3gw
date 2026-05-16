@@ -140,7 +140,7 @@ pub extern "C" fn transform(ptr: u32, len: u32) -> u64 {
 
         // Transform: convert to uppercase
         for (i, &byte) in input_slice.iter().enumerate() {
-            output_slice[i] = if byte >= b'a' && byte <= b'z' {
+            output_slice[i] = if byte.is_ascii_lowercase() {
                 byte - 32 // Convert to uppercase
             } else {
                 byte // Keep as-is

@@ -440,7 +440,7 @@ impl DedupManager {
         let mut dedup_blocks = 0;
 
         for chunk in chunks {
-            let hash = format!("{:x}", Sha256::digest(&chunk));
+            let hash = hex::encode(Sha256::digest(&chunk));
 
             // Check if block already exists
             if let Some(mut block_ref) = self.get_ref(&hash).await? {
@@ -525,7 +525,7 @@ impl DedupManager {
         key: &str,
         data: &Bytes,
     ) -> Result<ObjectBlockMap, DedupError> {
-        let hash = format!("{:x}", Sha256::digest(data));
+        let hash = hex::encode(Sha256::digest(data));
 
         // Store as single block
         let block_path = self.block_path(&hash);

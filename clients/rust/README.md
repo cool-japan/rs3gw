@@ -345,4 +345,4 @@ See the `examples/` directory for complete working examples:
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0

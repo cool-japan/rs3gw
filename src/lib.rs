@@ -813,6 +813,8 @@ pub struct AppState {
         Arc<std::sync::Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
     /// Tracks in-flight requests for graceful shutdown drain
     pub in_flight: InFlightTracker,
+    /// Server-side encryption service (SSE-S3 / AES-256-GCM envelope encryption)
+    pub encryption: Arc<crate::storage::encryption::EncryptionService>,
 }
 
 impl AppState {
@@ -890,6 +892,25 @@ impl AppState {
             None
         };
 
+        let kek_path = config.storage_root.join(".kek");
+        let key_provider: Arc<dyn crate::storage::encryption::KeyProvider> = {
+            match crate::storage::encryption::LocalKeyProvider::new_with_persistence(kek_path) {
+                Ok(provider) => Arc::new(provider),
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to load or create persistent KEK ({}); \
+                         falling back to ephemeral in-memory key — \
+                         encrypted objects will not survive a restart",
+                        err
+                    );
+                    Arc::new(crate::storage::encryption::LocalKeyProvider::default())
+                }
+            }
+        };
+        let encryption = Arc::new(crate::storage::encryption::EncryptionService::new(
+            key_provider,
+        ));
+
         Self {
             config,
             storage,
@@ -910,6 +931,7 @@ impl AppState {
             verifier,
             auth_failure_counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             in_flight: InFlightTracker::new(),
+            encryption,
         }
     }
 

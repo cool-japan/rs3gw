@@ -351,11 +351,7 @@ impl AnalyticsManager {
 
         let object_count = filtered_objects.len() as u64;
         let total_size_bytes: u64 = filtered_objects.iter().map(|(_, size, _)| size).sum();
-        let avg_object_size_bytes = if object_count > 0 {
-            total_size_bytes / object_count
-        } else {
-            0
-        };
+        let avg_object_size_bytes = total_size_bytes.checked_div(object_count).unwrap_or(0);
 
         // Calculate age distribution
         let now = Utc::now();

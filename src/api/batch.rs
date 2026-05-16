@@ -282,7 +282,7 @@ impl BatchManager {
         let mut job_list: Vec<_> = jobs.values().cloned().collect();
 
         // Sort by creation time (newest first)
-        job_list.sort_by(|a, b| b.creation_time.cmp(&a.creation_time));
+        job_list.sort_by_key(|b| std::cmp::Reverse(b.creation_time));
 
         if let Some(max) = max_results {
             job_list.truncate(max);

@@ -954,7 +954,7 @@ rs3gw stores all objects and metadata under `RS3GW_STORAGE_ROOT` using a simple,
 
 ## License
 
-rs3ctl is part of the rs3gw project and is distributed under the same license (MIT OR Apache-2.0).
+rs3ctl is part of the rs3gw project and is distributed under the same license (Apache-2.0).
 
 ## Contributing
 

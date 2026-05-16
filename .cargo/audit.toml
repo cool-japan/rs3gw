@@ -1,0 +1,13 @@
+[advisories]
+# Three rustls-webpki CVEs are transitive through aws-smithy-http-client's legacy TLS
+# code path. The AWS SDK (aws-config 1.8.16, aws-sdk-s3 1.132) is at the latest available
+# version and compiles both rustls 0.21 (legacy) and rustls 0.23 (current) simultaneously.
+# Upgrading to the non-legacy path requires aws-lc-rs (C/C++ bindings), which violates the
+# COOLJAPAN Pure Rust Policy. Track: https://github.com/awslabs/aws-sdk-rust for removal
+# of the legacy rustls-0.21 compilation path.
+ignore = [
+    "RUSTSEC-2026-0104",  # rustls-webpki: reachable panic in CRL parsing (< 0.103.13)
+    "RUSTSEC-2026-0098",  # rustls-webpki: URI name constraints accepted incorrectly (< 0.103.12)
+    "RUSTSEC-2026-0099",  # rustls-webpki: wildcard cert name constraints (< 0.103.12)
+    "RUSTSEC-2025-0134",  # rustls-pemfile: unmaintained (superseded by rustls-pki-types)
+]

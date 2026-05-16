@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::functions::default_true;
+// GCS SDK clients — used by GcsBackend
+#[allow(unused_imports)]
+use google_cloud_storage;
 
 /// Local filesystem backend implementation
 ///
@@ -170,10 +173,20 @@ impl S3Backend {
 /// Google Cloud Storage backend implementation
 ///
 /// Delegates storage operations to Google Cloud Storage using the GCS SDK
+/// (`google-cloud-storage` 1.9).  Two clients are needed:
+/// - `storage_control`: bucket CRUD + object metadata operations (gRPC-based)
+/// - `storage`: object data read/write operations (HTTP-based)
 ///
-/// NOTE: This is currently a stub. Full implementation requires proper GCS SDK integration.
-/// The google-cloud-storage SDK v0.25 has undergone significant API changes.
+/// The GCS resource name format is:
+/// - Buckets: `projects/_/buckets/{bucket_id}`
+/// - Objects: `projects/_/buckets/{bucket_id}/objects/{object_name}`
 pub struct GcsBackend {
+    /// Project ID used when creating buckets (e.g. "my-gcp-project")
+    pub(crate) project_id: String,
+    /// Client for bucket and object control-plane operations
+    pub(crate) storage_control: google_cloud_storage::client::StorageControl,
+    /// Client for object data-plane operations (read/write)
+    pub(crate) storage: google_cloud_storage::client::Storage,
     #[allow(dead_code)]
     config: BackendConfig,
 }
@@ -182,14 +195,54 @@ impl GcsBackend {
     /// Create a new Google Cloud Storage backend
     ///
     /// # Arguments
-    /// * `config` - Backend configuration with optional project ID and credentials
+    /// * `config` - Backend configuration.  The following fields are used:
+    ///   - `extra["project_id"]`: GCP project ID (required for bucket creation/listing)
+    ///   - `extra["endpoint"]`: Optional custom endpoint (e.g. for GCS emulators)
     ///
     /// # Errors
-    /// Returns an error if the GCS client configuration fails
+    /// Returns an error if either GCS client fails to initialize.
     pub async fn new(config: BackendConfig) -> Result<Self, StorageError> {
-        // Stub implementation - proper GCS client initialization will be added
-        // when the google-cloud-storage SDK API stabilizes
-        Ok(Self { config })
+        let project_id = config
+            .extra
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("_")
+            .to_string();
+
+        // Build StorageControl client (bucket + object metadata)
+        let storage_control = {
+            let mut builder = google_cloud_storage::client::StorageControl::builder();
+            if let Some(ep) = config.endpoint.as_deref() {
+                builder = builder.with_endpoint(ep);
+            }
+            builder.build().await.map_err(|e| {
+                StorageError::Internal(format!("GCS StorageControl init failed: {e}"))
+            })?
+        };
+
+        // Build Storage client (object data)
+        let storage = {
+            let mut builder = google_cloud_storage::client::Storage::builder();
+            if let Some(ep) = config.endpoint.as_deref() {
+                builder = builder.with_endpoint(ep);
+            }
+            builder
+                .build()
+                .await
+                .map_err(|e| StorageError::Internal(format!("GCS Storage init failed: {e}")))?
+        };
+
+        Ok(Self {
+            project_id,
+            storage_control,
+            storage,
+            config,
+        })
+    }
+
+    /// Return the GCS bucket resource name: `projects/_/buckets/{bucket}`.
+    pub(crate) fn bucket_name(&self, bucket: &str) -> String {
+        format!("projects/_/buckets/{bucket}")
     }
 }
 

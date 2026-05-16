@@ -29,9 +29,14 @@ use serde_json::Value;
 /// Parameters format: comma-separated list of field names
 /// Example: "name,email,age"
 ///
-/// Returns filtered JSON with only the specified fields
+/// Returns filtered JSON with only the specified fields.
+///
+/// # Safety
+///
+/// - `input_ptr` must point to at least `input_len` valid bytes for the duration of this call.
+/// - `params_ptr` must point to at least `params_len` valid bytes for the duration of this call.
 #[no_mangle]
-pub extern "C" fn transform_with_params(
+pub unsafe extern "C" fn transform_with_params(
     input_ptr: *const u8,
     input_len: usize,
     params_ptr: *const u8,
@@ -114,11 +119,14 @@ pub extern "C" fn allocate(size: usize) -> *mut u8 {
 }
 
 /// Deallocate memory
+///
+/// # Safety
+///
+/// `ptr` must have been allocated by [`allocate`] with the same `size`, and
+/// must not be used after this call.
 #[no_mangle]
-pub extern "C" fn deallocate(ptr: *mut u8, size: usize) {
-    unsafe {
-        let _ = Vec::from_raw_parts(ptr, 0, size);
-    }
+pub unsafe extern "C" fn deallocate(ptr: *mut u8, size: usize) {
+    let _ = Vec::from_raw_parts(ptr, 0, size);
 }
 
 /// Initialize global allocator (WASM only)

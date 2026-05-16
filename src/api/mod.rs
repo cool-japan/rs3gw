@@ -4,6 +4,8 @@
 
 pub mod arrow_flight;
 pub mod auth_middleware;
+pub mod cors;
+pub mod cors_middleware;
 // Disabled: arrow_flight_sql needs API updates (moved to .bak)
 // pub mod arrow_flight_sql;
 pub mod batch;
@@ -22,6 +24,7 @@ pub mod select;
 pub mod select_cache;
 pub mod select_cache_handlers;
 pub mod select_optimizer;
+pub mod sse;
 pub mod throttle;
 pub mod tiering_handlers;
 pub mod training_handlers;

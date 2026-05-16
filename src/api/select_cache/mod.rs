@@ -371,7 +371,7 @@ impl SelectResultCache {
         let patterns = self.query_patterns.read().await;
 
         let mut pattern_list: Vec<QueryPattern> = patterns.values().cloned().collect();
-        pattern_list.sort_by(|a, b| b.execution_count.cmp(&a.execution_count));
+        pattern_list.sort_by_key(|b| std::cmp::Reverse(b.execution_count));
         pattern_list.truncate(limit);
         pattern_list
     }

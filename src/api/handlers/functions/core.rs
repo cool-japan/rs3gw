@@ -3,13 +3,17 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::super::types::ConditionalResult;
-use crate::api::utils::{error_response, etag_matches, parse_http_date};
+use crate::api::utils::{
+    error_response, etag_matches, malformed_xml_response, parse_acl_xml, parse_canned_acl_header,
+    parse_http_date, parse_versioning_xml,
+};
 use crate::api::websocket::{S3Event, S3EventType};
 use crate::api::xml_responses::{
     AccessControlPolicy, CommonPrefix, ListAllMyBucketsResult, LocationConstraint, ObjectContents,
     VersioningConfiguration,
 };
-use crate::storage::{ObjectMetadata, StorageError};
+use crate::storage::versioning::VersioningStatus;
+use crate::storage::{AclConfig, BucketLockMetadata, ObjectMetadata, StorageError};
 use crate::AppState;
 use axum::{
     extract::{Path, State},
@@ -18,7 +22,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::TryStreamExt;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::select_parser::parse_select_request_xml;
 
@@ -178,6 +182,12 @@ pub fn storage_error_to_response(err: StorageError, resource: &str) -> Response 
             "You have exceeded the storage capacity of your account.",
             resource,
         ),
+        StorageError::ObjectLocked(ref msg) => {
+            error_response(StatusCode::FORBIDDEN, "AccessDenied", msg, resource)
+        }
+        StorageError::InvalidBucketState(ref msg) => {
+            error_response(StatusCode::CONFLICT, "InvalidBucketState", msg, resource)
+        }
     }
 }
 /// List all buckets
@@ -256,8 +266,12 @@ pub async fn head_bucket(State(state): State<AppState>, Path(bucket): Path<Strin
         (status = 500, description = "Internal server error")
     )
 )]
-pub async fn create_bucket(State(state): State<AppState>, Path(bucket): Path<String>) -> Response {
-    info!(bucket = % bucket, "CreateBucket");
+pub async fn create_bucket(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+    object_lock_enabled: bool,
+) -> Response {
+    info!(bucket = % bucket, object_lock_enabled = %object_lock_enabled, "CreateBucket");
 
     // Validate bucket name per S3 rules:
     // - 3–63 characters long
@@ -275,6 +289,20 @@ pub async fn create_bucket(State(state): State<AppState>, Path(bucket): Path<Str
 
     match state.storage.create_bucket(&bucket).await {
         Ok(()) => {
+            // If the caller requested Object Lock at creation time, persist the flag.
+            if object_lock_enabled {
+                let meta = BucketLockMetadata {
+                    object_lock_enabled: true,
+                };
+                if let Err(e) = state
+                    .storage
+                    .write_bucket_lock_metadata(&bucket, &meta)
+                    .await
+                {
+                    error!(bucket = %bucket, error = %e, "Failed to write bucket lock metadata");
+                    return storage_error_to_response(e, &format!("/{}", bucket));
+                }
+            }
             let event = S3Event::new(S3EventType::BucketCreated, bucket.clone());
             state.event_broadcaster.broadcast(event);
             (StatusCode::OK, [("Location", format!("/{}", bucket))]).into_response()
@@ -400,10 +428,15 @@ pub async fn get_bucket_versioning(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
 ) -> Response {
-    info!(bucket = % bucket, "GetBucketVersioning");
-    match state.storage.bucket_exists(&bucket).await {
-        Ok(true) => {
-            let result = VersioningConfiguration::new(None);
+    info!(bucket = %bucket, "GetBucketVersioning");
+    match state.storage.get_bucket_versioning(&bucket).await {
+        Ok(cfg) => {
+            let status = match cfg.status {
+                VersioningStatus::Enabled => Some("Enabled"),
+                VersioningStatus::Suspended => Some("Suspended"),
+                VersioningStatus::Unversioned => None,
+            };
+            let result = VersioningConfiguration::new(status);
             (
                 StatusCode::OK,
                 [("Content-Type", "application/xml")],
@@ -411,7 +444,7 @@ pub async fn get_bucket_versioning(
             )
                 .into_response()
         }
-        Ok(false) => error_response(
+        Err(StorageError::BucketNotFound) => error_response(
             StatusCode::NOT_FOUND,
             "NoSuchBucket",
             "The specified bucket does not exist.",
@@ -422,45 +455,170 @@ pub async fn get_bucket_versioning(
 }
 /// Get bucket ACL
 pub async fn get_bucket_acl(State(state): State<AppState>, Path(bucket): Path<String>) -> Response {
-    info!(bucket = % bucket, "GetBucketAcl");
+    info!(bucket = %bucket, "GetBucketAcl");
     match state.storage.bucket_exists(&bucket).await {
-        Ok(true) => {
-            let result = AccessControlPolicy::new_full_control();
-            (
-                StatusCode::OK,
-                [("Content-Type", "application/xml")],
-                result.to_xml(),
+        Ok(false) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist.",
+                &format!("/{}", bucket),
             )
-                .into_response()
         }
-        Ok(false) => error_response(
-            StatusCode::NOT_FOUND,
-            "NoSuchBucket",
-            "The specified bucket does not exist.",
-            &format!("/{}", bucket),
-        ),
+        Err(e) => return storage_error_to_response(e, &format!("/{}", bucket)),
+        Ok(true) => {}
+    }
+
+    let cfg = match state.storage.get_bucket_acl(&bucket).await {
+        Ok(cfg) => cfg,
+        Err(StorageError::NotFound(_)) => AclConfig::canned_full_control("rs3gw", "rs3gw"),
+        Err(e) => return storage_error_to_response(e, &format!("/{}", bucket)),
+    };
+
+    let policy = AccessControlPolicy::from_acl_config(&cfg);
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/xml")],
+        policy.to_xml(),
+    )
+        .into_response()
+}
+
+/// Put bucket ACL
+pub async fn put_bucket_acl(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    info!(bucket = %bucket, "PutBucketAcl");
+    match state.storage.bucket_exists(&bucket).await {
+        Ok(false) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchBucket",
+                "The specified bucket does not exist.",
+                &format!("/{}", bucket),
+            )
+        }
+        Err(e) => return storage_error_to_response(e, &format!("/{}", bucket)),
+        Ok(true) => {}
+    }
+
+    let canned_header = headers
+        .get("x-amz-acl")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let has_body = !body.is_empty();
+
+    let cfg = match (canned_header.as_deref(), has_body) {
+        (Some(_), true) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "UnexpectedContent",
+                "You provided both a canned ACL header and an ACL body; provide only one.",
+                &format!("/{}", bucket),
+            )
+        }
+        (None, false) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MissingSecurityHeader",
+                "Your request was missing a required header.",
+                &format!("/{}", bucket),
+            )
+        }
+        (Some(canned), false) => match parse_canned_acl_header(canned) {
+            Ok(normalized) => match AclConfig::from_canned(normalized, "rs3gw", "rs3gw") {
+                Ok(cfg) => cfg,
+                Err(e) => return storage_error_to_response(e, &format!("/{}", bucket)),
+            },
+            Err(msg) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    &msg,
+                    &format!("/{}", bucket),
+                )
+            }
+        },
+        (None, true) => {
+            let xml_str = match std::str::from_utf8(&body) {
+                Ok(s) => s,
+                Err(_) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidArgument",
+                        "Request body is not valid UTF-8.",
+                        &format!("/{}", bucket),
+                    )
+                }
+            };
+            match parse_acl_xml(xml_str) {
+                Ok(cfg) => cfg,
+                Err(msg) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "MalformedXML",
+                        &msg,
+                        &format!("/{}", bucket),
+                    )
+                }
+            }
+        }
+    };
+
+    match state.storage.put_bucket_acl(&bucket, &cfg).await {
+        Ok(()) => StatusCode::OK.into_response(),
         Err(e) => storage_error_to_response(e, &format!("/{}", bucket)),
     }
 }
-/// Put bucket versioning (stub - accepts request but versioning not supported)
+
+/// Put bucket versioning
 pub async fn put_bucket_versioning(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     body: Bytes,
 ) -> Response {
-    info!(bucket = % bucket, "PutBucketVersioning");
-    match state.storage.bucket_exists(&bucket).await {
-        Ok(true) => {
-            let body_str = String::from_utf8_lossy(&body);
-            if body_str.contains("<Status>Enabled</Status>") {
-                warn!(
-                    bucket = % bucket,
-                    "Versioning requested but not supported - request accepted"
-                );
-            }
-            StatusCode::OK.into_response()
+    info!(bucket = %bucket, "PutBucketVersioning");
+    let xml_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Request body is not valid UTF-8",
+                &format!("/{}", bucket),
+            )
         }
-        Ok(false) => error_response(
+    };
+    let status = match parse_versioning_xml(xml_str) {
+        Ok(s) => s,
+        Err(msg) => return malformed_xml_response(&msg),
+    };
+    let result = match status.as_deref() {
+        Some("Enabled") => state.storage.enable_bucket_versioning(&bucket).await,
+        Some("Suspended") => state.storage.suspend_bucket_versioning(&bucket).await,
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "VersioningConfiguration must contain Status",
+                &format!("/{}", bucket),
+            )
+        }
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Status must be Enabled or Suspended",
+                &format!("/{}", bucket),
+            )
+        }
+    };
+    match result {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(StorageError::BucketNotFound) => error_response(
             StatusCode::NOT_FOUND,
             "NoSuchBucket",
             "The specified bucket does not exist.",

@@ -111,6 +111,9 @@ async fn setup_auth_enforced_server(access_key: &str, secret_key: &str) -> AuthS
         verifier,
         auth_failure_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         in_flight: rs3gw::InFlightTracker::new(),
+        encryption: std::sync::Arc::new(rs3gw::storage::encryption::EncryptionService::new(
+            std::sync::Arc::new(rs3gw::storage::encryption::LocalKeyProvider::default()),
+        )),
     };
 
     let app = Router::new()

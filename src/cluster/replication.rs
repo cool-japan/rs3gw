@@ -127,10 +127,10 @@ impl ReplicationEvent {
         // Check prefix filter for object operations
         if let Some(prefix) = &config.prefix_filter {
             match self {
-                Self::PutObject { key, .. } | Self::DeleteObject { key, .. } => {
-                    if !key.starts_with(prefix) {
-                        return false;
-                    }
+                Self::PutObject { key, .. } | Self::DeleteObject { key, .. }
+                    if !key.starts_with(prefix) =>
+                {
+                    return false;
                 }
                 _ => {}
             }

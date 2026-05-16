@@ -1,15 +1,12 @@
 //! Integration tests for cross-bucket copy operations
 
-mod common;
-
 use bytes::Bytes;
+use tempfile::TempDir;
 
 #[tokio::test]
 async fn test_cross_bucket_copy() {
-    let (_client, _temp_dir, _server) = common::setup_test_server().await;
-
-    // Get storage engine directly for testing
-    let storage = rs3gw::storage::StorageEngine::new(_temp_dir.path().to_path_buf()).unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = rs3gw::storage::StorageEngine::new(temp_dir.path().to_path_buf()).unwrap();
 
     // Create two buckets
     storage.create_bucket("source-bucket").await.unwrap();
@@ -70,8 +67,8 @@ async fn test_cross_bucket_copy() {
 
 #[tokio::test]
 async fn test_cross_bucket_copy_with_metadata_replace() {
-    let (_client, _temp_dir, _server) = common::setup_test_server().await;
-    let storage = rs3gw::storage::StorageEngine::new(_temp_dir.path().to_path_buf()).unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = rs3gw::storage::StorageEngine::new(temp_dir.path().to_path_buf()).unwrap();
 
     storage.create_bucket("source-bucket").await.unwrap();
     storage.create_bucket("dest-bucket").await.unwrap();
@@ -115,8 +112,8 @@ async fn test_cross_bucket_copy_with_metadata_replace() {
 
 #[tokio::test]
 async fn test_cross_bucket_copy_preserves_metadata() {
-    let (_client, _temp_dir, _server) = common::setup_test_server().await;
-    let storage = rs3gw::storage::StorageEngine::new(_temp_dir.path().to_path_buf()).unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = rs3gw::storage::StorageEngine::new(temp_dir.path().to_path_buf()).unwrap();
 
     storage.create_bucket("source-bucket").await.unwrap();
     storage.create_bucket("dest-bucket").await.unwrap();
@@ -165,8 +162,8 @@ async fn test_cross_bucket_copy_preserves_metadata() {
 
 #[tokio::test]
 async fn test_cross_bucket_copy_nonexistent_source() {
-    let (_client, _temp_dir, _server) = common::setup_test_server().await;
-    let storage = rs3gw::storage::StorageEngine::new(_temp_dir.path().to_path_buf()).unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = rs3gw::storage::StorageEngine::new(temp_dir.path().to_path_buf()).unwrap();
 
     storage.create_bucket("source-bucket").await.unwrap();
     storage.create_bucket("dest-bucket").await.unwrap();
@@ -193,8 +190,8 @@ async fn test_cross_bucket_copy_nonexistent_source() {
 
 #[tokio::test]
 async fn test_cross_bucket_copy_same_bucket() {
-    let (_client, _temp_dir, _server) = common::setup_test_server().await;
-    let storage = rs3gw::storage::StorageEngine::new(_temp_dir.path().to_path_buf()).unwrap();
+    let temp_dir = TempDir::new().unwrap();
+    let storage = rs3gw::storage::StorageEngine::new(temp_dir.path().to_path_buf()).unwrap();
 
     storage.create_bucket("test-bucket").await.unwrap();
 

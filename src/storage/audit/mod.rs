@@ -280,7 +280,7 @@ impl AuditLogger {
         }
 
         // Sort by modification time (newest first)
-        rotated_files.sort_by(|a, b| b.1.cmp(&a.1));
+        rotated_files.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Remove old files beyond the limit
         for (path, _) in rotated_files.iter().skip(self.config.max_rotated_files) {
@@ -564,8 +564,8 @@ async fn compress_file(
     output_path: &std::path::Path,
 ) -> AuditResult<()> {
     let input_data = tokio::fs::read(input_path).await?;
-    let compressed = zstd::bulk::compress(&input_data, 3)
-        .map_err(|e| AuditError::Io(std::io::Error::other(e)))?;
+    let compressed = oxiarc_zstd::encode_all(&input_data, 3)
+        .map_err(|e| AuditError::Io(std::io::Error::other(e.to_string())))?;
     tokio::fs::write(output_path, compressed).await?;
     Ok(())
 }

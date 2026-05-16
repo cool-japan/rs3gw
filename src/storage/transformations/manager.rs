@@ -41,7 +41,7 @@ impl TransformationCache {
         let mut hasher = Sha256::new();
         hasher.update(data);
         hasher.update(format!("{:?}", transformation).as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Get cached result

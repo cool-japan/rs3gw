@@ -583,7 +583,7 @@ impl TrainingManager {
         }
 
         // Sort by epoch (descending)
-        checkpoints.sort_by(|a, b| b.epoch.cmp(&a.epoch));
+        checkpoints.sort_by_key(|b| std::cmp::Reverse(b.epoch));
 
         Ok(checkpoints)
     }

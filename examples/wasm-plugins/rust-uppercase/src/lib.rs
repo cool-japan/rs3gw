@@ -15,8 +15,13 @@ use core::slice;
 /// This function is called from the rs3gw WASM runtime.
 /// It receives a pointer to the input data and its length,
 /// and returns a pointer to the transformed data.
+///
+/// # Safety
+///
+/// `input_ptr` must point to at least `input_len` valid bytes of memory for the
+/// duration of this call.
 #[no_mangle]
-pub extern "C" fn transform(input_ptr: *const u8, input_len: usize) -> *const u8 {
+pub unsafe extern "C" fn transform(input_ptr: *const u8, input_len: usize) -> *const u8 {
     // Safety: We trust the host to provide valid pointers
     let input = unsafe { slice::from_raw_parts(input_ptr, input_len) };
 
@@ -52,9 +57,14 @@ pub extern "C" fn get_output_length() -> usize {
 ///
 /// This is a more robust version that returns both the output pointer and length.
 /// Returns a packed u64 where high 32 bits = length, low 32 bits = pointer offset
+///
+/// # Safety
+///
+/// `input_ptr` must point to at least `input_len` valid bytes of memory for the
+/// duration of this call.
 #[no_mangle]
-pub extern "C" fn transform_with_length(input_ptr: *const u8, input_len: usize) -> u64 {
-    // Safety: We trust the host to provide valid pointers
+pub unsafe extern "C" fn transform_with_length(input_ptr: *const u8, input_len: usize) -> u64 {
+    // Safety: guaranteed by the caller (host WASM runtime)
     let input = unsafe { slice::from_raw_parts(input_ptr, input_len) };
 
     // Convert input to string
@@ -94,12 +104,15 @@ pub extern "C" fn allocate(size: usize) -> *mut u8 {
 
 /// Deallocate memory
 ///
-/// The host should call this to free memory when done
+/// The host should call this to free memory when done.
+///
+/// # Safety
+///
+/// `ptr` must have been allocated by [`allocate`] with the same `size`, and
+/// must not be used after this call.
 #[no_mangle]
-pub extern "C" fn deallocate(ptr: *mut u8, size: usize) {
-    unsafe {
-        let _ = Vec::from_raw_parts(ptr, 0, size);
-    }
+pub unsafe extern "C" fn deallocate(ptr: *mut u8, size: usize) {
+    let _ = Vec::from_raw_parts(ptr, 0, size);
 }
 
 #[cfg(test)]
@@ -110,7 +123,8 @@ mod tests {
     fn test_uppercase_transform() {
         // Test the transform function directly (works on both native and WASM)
         let input = b"hello world";
-        let result_ptr = transform(input.as_ptr(), input.len());
+        // Safety: input pointer and length are valid, derived from a live slice
+        let result_ptr = unsafe { transform(input.as_ptr(), input.len()) };
 
         // On native 64-bit, we can safely read the output using the full pointer
         // The transform function returns the actual pointer without truncation
@@ -124,7 +138,8 @@ mod tests {
     #[test]
     fn test_uppercase_transform_non_ascii() {
         let input = b"hello 123 world!";
-        let result_ptr = transform(input.as_ptr(), input.len());
+        // Safety: input pointer and length are valid, derived from a live slice
+        let result_ptr = unsafe { transform(input.as_ptr(), input.len()) };
 
         let expected = "HELLO 123 WORLD!";
         let output = unsafe { slice::from_raw_parts(result_ptr, expected.len()) };
@@ -138,7 +153,8 @@ mod tests {
     fn test_transform_with_length_wasm() {
         // This test only runs on WASM where 32-bit pointer packing is valid
         let input = b"hello world";
-        let result = transform_with_length(input.as_ptr(), input.len());
+        // Safety: input pointer and length are valid, derived from a live slice
+        let result = unsafe { transform_with_length(input.as_ptr(), input.len()) };
 
         let output_len = (result >> 32) as usize;
         let output_ptr = (result & 0xFFFFFFFF) as *const u8;

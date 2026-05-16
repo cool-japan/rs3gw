@@ -8,29 +8,29 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
-authors = ["rs3gw contributors"]
-license = "MIT OR Apache-2.0"
+authors = ["COOLJAPAN OU (Team Kitasan)"]
+license = "Apache-2.0"
 repository = "https://github.com/cool-japan/rs3gw"
 
 [workspace.dependencies]
 # Core async runtime
-tokio = { version = "1.50", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 tokio-stream = "0.1"
 
 # Web framework
-axum = { version = "0.8.8", features = ["multipart", "ws"] }
+axum = { version = "0.8.9", features = ["multipart", "ws"] }
 tower = { version = "0.5.3", features = ["limit"] }
-tower-http = { version = "0.6.8", features = ["cors", "trace", "request-id", "util", "timeout"] }
+tower-http = { version = "0.6.10", features = ["cors", "trace", "request-id", "util", "timeout"] }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml = "0.9"
-quick-xml = { version = "0.38.4", features = ["serialize"] }
-toml = "0.9.12"
+quick-xml = { version = "0.40.1", features = ["serialize"] }
+toml = "1.1.2"
 
 # Error handling
 thiserror = "2.0.18"
@@ -40,6 +40,8 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 # OpenTelemetry distributed tracing
+# Pinned to 0.31: tracing-opentelemetry 0.32.x internally depends on opentelemetry 0.31.
+# Upgrade all four crates to 0.32 when tracing-opentelemetry 0.33 ships (tracks otel 0.32).
 opentelemetry = { version = "0.31", features = ["trace", "metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "metrics"] }
 opentelemetry-otlp = { version = "0.31", features = ["trace", "metrics", "grpc-tonic"] }
@@ -47,7 +49,7 @@ opentelemetry-semantic-conventions = "0.31"
 tracing-opentelemetry = "0.32"
 
 # Utilities
-uuid = { version = "1.22.0", features = ["v4", "serde"] }
+uuid = { version = "1.23.1", features = ["v4", "serde"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 bytes = "1.11"
 futures = "0.3"
@@ -55,8 +57,8 @@ percent-encoding = "2.3"
 regex = "1.12"
 base64 = "0.22"
 hex = "0.4"
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 tokio-util = { version = "0.7", features = ["io"] }
 http-body-util = "0.1"
 num_cpus = "1.17"
@@ -66,39 +68,39 @@ hostname = "0.4"
 aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
 md5 = "0.8"
-getrandom = "0.3"
+getrandom = "0.4"
 
 # Checksums
 crc32c = "0.6"
 crc32fast = "1.5"
-sha1 = "0.10"
+sha1 = "0.11"
 
 # HTTP client for webhooks
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 url = "2.5"
 
 # Compression
-zstd = "0.13"
-lz4_flex = "0.12"
-flate2 = "1.1"
+oxiarc-zstd = "0.2.8"
+oxiarc-lz4 = "0.2.8"
+oxiarc-deflate = "0.2.8"
 
 # Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 
 # SciRS2 Ecosystem (SCIRS2 POLICY)
-scirs2-core = "0.1"
-scirs2-io = "0.1"
+scirs2-core = "0.4.4"
+scirs2-io = "0.4.4"
 
 # Parquet support for S3 Select
-parquet = "57.3"
-arrow = "57.3"
+parquet = "58.3"
+arrow = "58.3"
 
 # Apache Avro support for S3 Select
 apache-avro = "0.21"
 
 # Apache ORC support for S3 Select
-orc-rust = "0.7"
+orc-rust = "0.8"
 
 # Protocol Buffers support for S3 Select
 prost-reflect = "0.16"
@@ -107,16 +109,16 @@ prost-reflect = "0.16"
 rmp-serde = "1.3"
 
 # Image processing
-image = "0.25.9"
+image = "0.25.10"
 
 # Video transcoding (feature-gated due to C dependencies)
-ffmpeg-next = "8.0"
+ffmpeg-next = "8.1"
 
 # WASM runtime (pure Rust)
-wasmtime = "40.0"
+wasmtime = "44.0"
 
 # Parallel processing
-rayon = "1.11"
+rayon = "1.12"
 
 # Async traits
 async-trait = "0.1"
@@ -126,7 +128,7 @@ async-stream = "0.3"
 humantime = "2.3"
 
 # CLI and error handling
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 anyhow = "1.0"
 indicatif = "0.18"
 
@@ -147,25 +149,27 @@ prost = "0.14"
 prost-types = "0.14"
 
 # GraphQL support
-async-graphql = "7.1.0"
+async-graphql = "7.2.1"
 async-graphql-axum = "7.2.1"
 
 # OpenAPI/Swagger support
-utoipa = { version = "5.4", features = ["axum_extras", "chrono", "uuid"] }
+utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 # AWS SDK for S3-compatible backends (MinIO, AWS S3)
-aws-sdk-s3 = "1.118"
-aws-config = "1.8.12"
+aws-sdk-s3 = "1.132"
+aws-config = "1.8.16"
 
 # Google Cloud Storage SDK
-google-cloud-storage = "1.9"
-google-cloud-auth = "1.7"
+google-cloud-storage = "1.12"
+google-cloud-auth = "1.10"
+google-cloud-gax = "1.10"
+google-cloud-wkt = "1.4"
 
 # Azure Storage SDK
 azure_storage = "0.21"
 azure_storage_blobs = "0.21"
-azure_core = "0.30"
+azure_core = "1.0"
 
 # Linux-specific dependencies
 libc = "0.2"
@@ -174,7 +178,7 @@ tokio-uring = "0.5.0"
 # Testing
 tokio-test = "0.4"
 tempfile = "3.27"
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 
 # Benchmarking
 criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
@@ -268,9 +272,9 @@ reqwest.workspace = true
 url.workspace = true
 
 # Compression
-zstd.workspace = true
-lz4_flex.workspace = true
-flate2.workspace = true
+oxiarc-zstd.workspace = true
+oxiarc-lz4.workspace = true
+oxiarc-deflate.workspace = true
 
 # Metrics
 metrics.workspace = true
@@ -351,6 +355,8 @@ aws-config.workspace = true
 # Google Cloud Storage SDK
 google-cloud-storage.workspace = true
 google-cloud-auth.workspace = true
+google-cloud-gax.workspace = true
+google-cloud-wkt.workspace = true
 
 # Azure Storage SDK
 azure_storage.workspace = true

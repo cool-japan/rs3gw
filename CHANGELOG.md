@@ -5,6 +5,18 @@ All notable changes to rs3gw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-16
+
+### Added
+- Comprehensive tests for S3 Object Lock, RestoreObject, and SSE operations (961 tests total)
+
+### Changed
+- Update dependencies: quick-xml 0.40, parquet/arrow 58.x, azure_core 1.0
+- Reintroduce integration smoke test workflow (`.disabled`)
+
+### Fixed
+- Resolve OpenTelemetry version conflict: downgrade `opentelemetry*` from 0.32 to 0.31 to align with `tracing-opentelemetry` 0.32.x which internally targets opentelemetry 0.31.x
+
 ## [0.2.0] - 2026-03-16
 
 ### Added
@@ -243,5 +255,6 @@ N/A (initial release)
 - Review ABAC policies for fine-grained access control
 - Enable audit logging for compliance requirements
 
+[0.2.1]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.0
 [0.1.0]: https://github.com/cool-japan/rs3gw/releases/tag/v0.1.0
