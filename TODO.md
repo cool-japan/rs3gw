@@ -103,7 +103,7 @@
       indirectly (COOLJAPAN OxiARC/no-zip policy) — needs a `cargo tree -i` to find the source and
       whether it can be feature-gated out. Does not affect the build/runtime.
 
-## v0.2.2 (Current Release)
+## v0.2.3 (Current Release)
 
 ### Scope
 - S3-compatible REST API (core bucket/object/multipart operations)

@@ -5,6 +5,14 @@ All notable changes to rs3gw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - Unreleased
+
+### Added
+
+### Changed
+
+### Fixed
+
 ## [0.2.2] - 2026-06-17
 
 ### Added
@@ -281,6 +289,7 @@ N/A (initial release)
 - Review ABAC policies for fine-grained access control
 - Enable audit logging for compliance requirements
 
+[0.2.3]: https://github.com/cool-japan/rs3gw/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.2
 [0.2.1]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.0

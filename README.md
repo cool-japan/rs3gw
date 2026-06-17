@@ -100,10 +100,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 # Full server + all features:
-rs3gw = "0.2.2"
+rs3gw = "0.2.3"
 
 # Storage-only (no server, minimal deps, Pure Rust):
-rs3gw = { version = "0.2.2", default-features = false, features = ["local"] }
+rs3gw = { version = "0.2.3", default-features = false, features = ["local"] }
 ```
 
 ### Quick Start (Local Development)
@@ -959,11 +959,11 @@ We welcome contributions! Please see our development process:
 
 ## Project Summary
 
-- **Version**: 0.2.2 (2026-06-17)
+- **Version**: 0.2.3 (2026-06-17)
 - **Language**: Rust (100% Pure Rust default features)
 - **Lines of Code**: ~85,276 Rust SLoC (100,450 total Rust lines across 220 files)
 - **Modules**: 220 Rust files across 324 total files
-- **Tests**: 996 tests (987 lib + integration, 9 doc tests), 0 failures
+- **Tests**: 998 tests (989 lib + integration, 9 doc tests), 0 failures
 - **Quality**: 0 clippy warnings, 0 rustdoc errors
 - **Dependencies**: Carefully selected for performance and security (all up-to-date)
 - **Policy Compliance**: 100% SCIRS2 compliant
@@ -983,7 +983,7 @@ Licensed under the [Apache License, Version 2.0](LICENSE).
 
 ## Known Limitations
 
-The following are known gaps in the current release (0.2.2). They are documented here to set accurate expectations for production deployments.
+The following are known gaps in the current release (0.2.3). They are documented here to set accurate expectations for production deployments.
 
 - **SigV4 chunked streaming HMAC**: Per-chunk HMAC verification for `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and `UNSIGNED-PAYLOAD` is not implemented. The request body is accepted when these payload types are declared; only the canonical request signature is verified. Full per-chunk HMAC is planned for a future release.
 - **Object Lock / WORM**: Object Lock API endpoints (`GetObjectRetention`, `PutObjectRetention`, `GetObjectLegalHold`, `PutObjectLegalHold`) are registered but return "Object Lock must be enabled" errors. Retention and legal-hold constraints are not enforced.
@@ -1007,7 +1007,7 @@ The following are known gaps in the current release (0.2.2). They are documented
 
 ## Project Statistics
 
-Measured with `tokei` on 2026-06-17 (branch `0.2.2`):
+Measured with `tokei` on 2026-06-17 (branch `0.2.3`):
 
 | Language     | Files | Code Lines | Comment Lines | Blank Lines |
 |--------------|------:|----------:|-------------:|------------:|
