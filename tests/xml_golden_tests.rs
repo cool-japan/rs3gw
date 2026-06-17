@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Golden tests for XML response serialization
 //!
 //! Verifies that all XML response structs produce well-formed, correct XML.

@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Integration tests for WebSocket event streaming
 
 mod common;

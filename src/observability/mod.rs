@@ -18,7 +18,9 @@ pub mod metrics_tracker;
 pub mod predictive_analytics;
 pub mod profiling;
 pub mod resource_manager;
+#[cfg(feature = "server")]
 pub mod tracing;
+pub mod usage;
 
 pub use self::anomaly_detection::{
     Anomaly, AnomalyDetectionConfig, AnomalyDetector, AnomalySeverity, AnomalyType, DetectorStats,
@@ -37,4 +39,9 @@ pub use self::profiling::{
     CpuStats, IoStats, MemoryStats, ProfileSnapshot, Profiler, ProfilingConfig,
 };
 pub use self::resource_manager::{LoadMetrics, ResourceConfig, ResourceManager};
+#[cfg(feature = "server")]
 pub use self::tracing::{init_telemetry, shutdown_telemetry, TelemetryConfig};
+pub use self::usage::{
+    BucketUsage, CostBreakdown, LoggingUsageHook, PricingConfig, UsageHook, UsageReport,
+    UsageTracker,
+};

@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Integration tests for gRPC API
 //!
 //! Tests all gRPC endpoints including:
@@ -138,6 +139,7 @@ async fn setup_grpc_test_server() -> (S3ServiceClient<Channel>, TempDir, GrpcTes
     let select_result_cache =
         std::sync::Arc::new(rs3gw::api::SelectResultCache::new(100, 10 * 1024 * 1024));
 
+    #[cfg(feature = "formats")]
     let query_intelligence = std::sync::Arc::new(rs3gw::api::QueryIntelligence::new());
 
     let training_path = temp_dir.path().join("training");
@@ -151,13 +153,16 @@ async fn setup_grpc_test_server() -> (S3ServiceClient<Channel>, TempDir, GrpcTes
         throttle: None,
         quota: None,
         event_broadcaster: rs3gw::api::EventBroadcaster::new(),
+        #[cfg(feature = "formats")]
         query_plan_cache: None,
         select_result_cache,
+        #[cfg(feature = "formats")]
         query_intelligence,
         advanced_replication: None,
         preprocessing_manager,
         predictive_analytics,
         metrics_tracker,
+        usage_tracker: std::sync::Arc::new(rs3gw::observability::UsageTracker::new()),
         training_manager,
         start_time: std::time::Instant::now(),
         verifier: None,

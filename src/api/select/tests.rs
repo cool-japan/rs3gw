@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! Tests for S3 Select functionality
 
 use super::parser::parse_sql;

@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Integration tests for Query Intelligence API endpoints
 //!
 //! Tests all query intelligence endpoints:

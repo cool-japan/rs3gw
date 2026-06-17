@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! S3 Select SQL parser and helper functions
 //!
 //! Contains SQL parsing, condition evaluation, and helper functions.

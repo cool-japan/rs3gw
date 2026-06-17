@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Object operation tests for rs3gw
 
 mod common;

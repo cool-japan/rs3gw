@@ -348,6 +348,7 @@ pub async fn put_object(
             }
 
             state.metrics_tracker.record_bytes_uploaded(body_size);
+            state.usage_tracker.record_put(&bucket, body_size).await;
             let event = S3Event::new(S3EventType::ObjectCreated, bucket.clone())
                 .with_key(key.clone())
                 .with_size(body_size)
@@ -598,6 +599,7 @@ pub async fn delete_object(
     info!(bucket = % bucket, key = % key, "DeleteObject");
     match state.storage.delete_object(&bucket, &key).await {
         Ok(()) => {
+            state.usage_tracker.record_delete(&bucket).await;
             let event =
                 S3Event::new(S3EventType::ObjectRemoved, bucket.clone()).with_key(key.clone());
             state.event_broadcaster.broadcast(event);

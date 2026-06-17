@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Tests for S3 ID-keyed bucket configuration APIs (metrics, analytics, inventory)
 
 mod common;

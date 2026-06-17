@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Tests for S3 SSE-S3 (AES-256 server-side encryption) operations.
 //!
 //! All tests use a single `setup_test_server()` call per test so that the
@@ -1119,4 +1120,644 @@ async fn test_chunked_sse_range_get() {
         expected_slice,
         "range-GET body must match expected plaintext slice"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: PUT a deterministic multi-chunk (6 MiB) SSE-S3 object and return the
+// plaintext for slice comparisons. 6 MiB = chunk 0 (5 MiB) + chunk 1 (1 MiB).
+// ---------------------------------------------------------------------------
+async fn put_6mib_sse_object(
+    http: &reqwest::Client,
+    base_url: &str,
+    bucket: &str,
+    key: &str,
+) -> Vec<u8> {
+    let put_bucket = http
+        .put(format!("{}/{}", base_url, bucket))
+        .send()
+        .await
+        .expect("create bucket");
+    assert!(put_bucket.status().is_success(), "create bucket");
+
+    let size = 6 * 1024 * 1024usize; // 6_291_456
+    let plaintext: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let put = http
+        .put(format!("{}/{}/{}", base_url, bucket, key))
+        .header("x-amz-server-side-encryption", "AES256")
+        .body(plaintext.clone())
+        .send()
+        .await
+        .expect("PUT should complete");
+    assert_eq!(put.status(), 200, "PUT returned {}", put.status());
+    plaintext
+}
+
+// ---------------------------------------------------------------------------
+// Test: Suffix range (bytes=-N) on a chunked SSE object.
+//
+// Regression guard: `meta.size` for a single-PUT SSE object is the CIPHERTEXT
+// size (plaintext + 16 per chunk). A suffix range resolved against ciphertext
+// size would overshoot the plaintext end. The range must be sized in plaintext
+// coordinates (from the sidecar), so bytes=-1000000 returns the last 1,000,000
+// PLAINTEXT bytes.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_chunked_sse_suffix_range() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+    let base_url = &server.base_url;
+    let bucket = format!("sse-suffix-{}", uuid::Uuid::new_v4());
+
+    let plaintext = put_6mib_sse_object(&http, base_url, &bucket, "obj").await;
+    let total = plaintext.len(); // 6_291_456
+    let suffix = 1_000_000usize;
+    let expected_start = total - suffix; // 5_291_456
+
+    let resp = http
+        .get(format!("{}/{}/obj", base_url, bucket))
+        .header("Range", format!("bytes=-{}", suffix))
+        .send()
+        .await
+        .expect("suffix range-GET should complete");
+    assert_eq!(resp.status(), 206, "suffix range must be 206");
+
+    let content_range = resp
+        .headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(
+        content_range,
+        format!("bytes {}-{}/{}", expected_start, total - 1, total),
+        "Content-Range must be in plaintext coordinates"
+    );
+
+    let body = resp.bytes().await.expect("read body");
+    assert_eq!(body.len(), suffix, "suffix length mismatch");
+    assert_eq!(
+        body.as_ref(),
+        &plaintext[expected_start..],
+        "suffix body must equal the last {} plaintext bytes",
+        suffix
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Open-ended range (bytes=A-) on a chunked SSE object.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_chunked_sse_open_ended_range() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+    let base_url = &server.base_url;
+    let bucket = format!("sse-openend-{}", uuid::Uuid::new_v4());
+
+    let plaintext = put_6mib_sse_object(&http, base_url, &bucket, "obj").await;
+    let total = plaintext.len();
+    let start = 6_000_000usize;
+
+    let resp = http
+        .get(format!("{}/{}/obj", base_url, bucket))
+        .header("Range", format!("bytes={}-", start))
+        .send()
+        .await
+        .expect("open-ended range-GET should complete");
+    assert_eq!(resp.status(), 206, "open-ended range must be 206");
+
+    let content_range = resp
+        .headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(
+        content_range,
+        format!("bytes {}-{}/{}", start, total - 1, total)
+    );
+
+    let body = resp.bytes().await.expect("read body");
+    assert_eq!(body.len(), total - start);
+    assert_eq!(body.as_ref(), &plaintext[start..]);
+}
+
+// ---------------------------------------------------------------------------
+// Test: Range entirely inside the SECOND chunk (non-zero file_start).
+//
+// This is the high-value seekable regression guard: only chunk 1 is read from
+// disk, and `decrypt_chunked_range_from_slice` must index the ciphertext slice
+// relative to chunk 1's file offset (not absolute 0).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_chunked_sse_second_chunk_only_range() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+    let base_url = &server.base_url;
+    let bucket = format!("sse-chunk1-{}", uuid::Uuid::new_v4());
+
+    let plaintext = put_6mib_sse_object(&http, base_url, &bucket, "obj").await;
+    let total = plaintext.len();
+    // Both endpoints are past the 5 MiB (5_242_880) chunk boundary → chunk 1 only.
+    let start = 5_300_000usize;
+    let end_inclusive = 5_400_000usize;
+
+    let resp = http
+        .get(format!("{}/{}/obj", base_url, bucket))
+        .header("Range", format!("bytes={}-{}", start, end_inclusive))
+        .send()
+        .await
+        .expect("range-GET should complete");
+    assert_eq!(resp.status(), 206);
+
+    let content_range = resp
+        .headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(
+        content_range,
+        format!("bytes {}-{}/{}", start, end_inclusive, total)
+    );
+
+    let body = resp.bytes().await.expect("read body");
+    assert_eq!(body.len(), end_inclusive - start + 1);
+    assert_eq!(
+        body.as_ref(),
+        &plaintext[start..=end_inclusive],
+        "second-chunk range body must match plaintext slice"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Empty (0-byte) SSE object — full GET returns 200 empty, any range 416.
+//
+// An empty SSE-S3 object encrypts to 0 ciphertext bytes with no chunks; the GET
+// path must short-circuit to an empty body (the single-shot decrypt would
+// otherwise be handed an empty nonce).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_empty_sse_object_get_and_range() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+    let base_url = &server.base_url;
+    let bucket = format!("sse-empty-{}", uuid::Uuid::new_v4());
+
+    let put_bucket = http
+        .put(format!("{}/{}", base_url, bucket))
+        .send()
+        .await
+        .expect("create bucket");
+    assert!(put_bucket.status().is_success());
+
+    let put = http
+        .put(format!("{}/{}/empty", base_url, bucket))
+        .header("x-amz-server-side-encryption", "AES256")
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .expect("PUT empty should complete");
+    assert_eq!(put.status(), 200, "PUT empty SSE object should be 200");
+
+    // Full GET → 200, empty body.
+    let get = http
+        .get(format!("{}/{}/empty", base_url, bucket))
+        .send()
+        .await
+        .expect("GET should complete");
+    assert_eq!(get.status(), 200, "full GET of empty SSE object → 200");
+    assert_eq!(
+        get.headers()
+            .get("x-amz-server-side-encryption")
+            .and_then(|v| v.to_str().ok()),
+        Some("AES256")
+    );
+    let body = get.bytes().await.expect("read body");
+    assert_eq!(body.len(), 0, "empty SSE object body must be empty");
+
+    // Any range on a 0-byte object → 416 Range Not Satisfiable.
+    let range = http
+        .get(format!("{}/{}/empty", base_url, bucket))
+        .header("Range", "bytes=0-0")
+        .send()
+        .await
+        .expect("range-GET should complete");
+    assert_eq!(
+        range.status(),
+        416,
+        "range on empty object → 416, got {}",
+        range.status()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: D2 — full-object GET of a chunked SSE object with a stored SHA-256
+// checksum runs decrypt-then-hash validation and succeeds for valid data.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_chunked_sse_full_get_checksum_validated() {
+    use sha2::Digest;
+
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+    let base_url = &server.base_url;
+    let bucket = format!("sse-d2-{}", uuid::Uuid::new_v4());
+
+    let put_bucket = http
+        .put(format!("{}/{}", base_url, bucket))
+        .send()
+        .await
+        .expect("create bucket");
+    assert!(put_bucket.status().is_success());
+
+    let size = 6 * 1024 * 1024usize;
+    let plaintext: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let checksum_b64 =
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(&plaintext));
+
+    let put = http
+        .put(format!("{}/{}/obj", base_url, bucket))
+        .header("x-amz-server-side-encryption", "AES256")
+        .header("x-amz-checksum-sha256", &checksum_b64)
+        .body(plaintext.clone())
+        .send()
+        .await
+        .expect("PUT should complete");
+    assert_eq!(put.status(), 200, "PUT returned {}", put.status());
+
+    // Full GET: D2 decrypt-then-hash must pass and return the object.
+    let get = http
+        .get(format!("{}/{}/obj", base_url, bucket))
+        .send()
+        .await
+        .expect("GET should complete");
+    assert_eq!(
+        get.status(),
+        200,
+        "full GET with valid SHA-256 checksum must pass D2 validation"
+    );
+    assert_eq!(
+        get.headers()
+            .get("x-amz-checksum-sha256")
+            .and_then(|v| v.to_str().ok()),
+        Some(checksum_b64.as_str()),
+        "GET must echo the stored SHA-256 checksum"
+    );
+    let body = get.bytes().await.expect("read body");
+    assert_eq!(body.as_ref(), plaintext.as_slice(), "body round-trips");
+}
+
+// ---------------------------------------------------------------------------
+// Test: Range-GET on a multipart SSE-S3 object (v1 single-shot fallback).
+//
+// Multipart-SSE objects are encrypted single-shot (empty `chunks`), so the
+// seekable path does not apply; this proves the v1 full-read-then-slice
+// fallback returns the correct plaintext slice.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_multipart_sse_range_get() {
+    let (client, _temp_dir, server) = setup_test_server().await;
+    let bucket = format!("sse-mp-range-{}", uuid::Uuid::new_v4());
+    let key = "mp-range-object";
+    let base_url = &server.base_url;
+    let http = reqwest::Client::new();
+
+    let part1: Vec<u8> = (0u8..=255u8).collect(); // 256 bytes
+    let part2: Vec<u8> = (0u8..128u8).rev().collect(); // 128 bytes
+    let mut full = part1.clone();
+    full.extend_from_slice(&part2);
+
+    client
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("create_bucket");
+
+    let create_resp = http
+        .post(format!("{}/{}/{}?uploads", base_url, bucket, key))
+        .header("x-amz-server-side-encryption", "AES256")
+        .send()
+        .await
+        .expect("CreateMultipartUpload");
+    assert_eq!(create_resp.status(), 200);
+    let xml_body = create_resp.text().await.expect("read body");
+    let upload_id = {
+        let start = xml_body.find("<UploadId>").expect("UploadId") + "<UploadId>".len();
+        let end = xml_body.find("</UploadId>").expect("/UploadId");
+        xml_body[start..end].to_string()
+    };
+
+    let up1 = http
+        .put(format!(
+            "{}/{}/{}?partNumber=1&uploadId={}",
+            base_url, bucket, key, upload_id
+        ))
+        .body(part1.clone())
+        .send()
+        .await
+        .expect("UploadPart 1");
+    let etag1 = up1
+        .headers()
+        .get("ETag")
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag 1")
+        .trim_matches('"')
+        .to_string();
+    let up2 = http
+        .put(format!(
+            "{}/{}/{}?partNumber=2&uploadId={}",
+            base_url, bucket, key, upload_id
+        ))
+        .body(part2.clone())
+        .send()
+        .await
+        .expect("UploadPart 2");
+    let etag2 = up2
+        .headers()
+        .get("ETag")
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag 2")
+        .trim_matches('"')
+        .to_string();
+
+    let complete_xml = format!(
+        r#"<CompleteMultipartUpload>
+  <Part><PartNumber>1</PartNumber><ETag>"{}"</ETag></Part>
+  <Part><PartNumber>2</PartNumber><ETag>"{}"</ETag></Part>
+</CompleteMultipartUpload>"#,
+        etag1, etag2
+    );
+    let complete = http
+        .post(format!(
+            "{}/{}/{}?uploadId={}",
+            base_url, bucket, key, upload_id
+        ))
+        .header("Content-Type", "application/xml")
+        .body(complete_xml)
+        .send()
+        .await
+        .expect("CompleteMultipartUpload");
+    assert_eq!(
+        complete.status(),
+        200,
+        "complete returned {}",
+        complete.status()
+    );
+
+    // Range-GET bytes=10-20 on a small (single-chunk) multipart SSE object. Multipart
+    // objects are now post-encrypted with the chunked (v2) format, so this goes through
+    // the seekable chunk path; the 384-byte object has a single chunk, so the covering
+    // read happens to be the whole (tiny) object. See `test_multipart_sse_seekable_multichunk`
+    // for the multi-chunk case that actually skips chunks.
+    let resp = http
+        .get(format!("{}/{}/{}", base_url, bucket, key))
+        .header("Range", "bytes=10-20")
+        .send()
+        .await
+        .expect("range-GET should complete");
+    assert_eq!(resp.status(), 206, "multipart SSE range must be 206");
+    let body = resp.bytes().await.expect("read body");
+    assert_eq!(
+        body.as_ref(),
+        &full[10..=20],
+        "multipart SSE range slice must match plaintext"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: multipart-SSE upload of `n_parts` parts of `part_size` bytes each.
+//
+// Returns the full assembled plaintext. The object is initiated with AES256, so
+// CompleteMultipartUpload post-encrypts the assembled plaintext with the chunked
+// (v2) format — which is what makes multipart objects seekable.
+// ---------------------------------------------------------------------------
+async fn put_multipart_sse_object(
+    http: &reqwest::Client,
+    base_url: &str,
+    bucket: &str,
+    key: &str,
+    part_size: usize,
+    n_parts: usize,
+) -> Vec<u8> {
+    let put_bucket = http
+        .put(format!("{}/{}", base_url, bucket))
+        .send()
+        .await
+        .expect("create bucket");
+    assert!(put_bucket.status().is_success(), "create bucket");
+
+    let create_resp = http
+        .post(format!("{}/{}/{}?uploads", base_url, bucket, key))
+        .header("x-amz-server-side-encryption", "AES256")
+        .send()
+        .await
+        .expect("CreateMultipartUpload");
+    assert_eq!(create_resp.status(), 200);
+    let xml_body = create_resp.text().await.expect("read body");
+    let upload_id = {
+        let start = xml_body.find("<UploadId>").expect("UploadId") + "<UploadId>".len();
+        let end = xml_body.find("</UploadId>").expect("/UploadId");
+        xml_body[start..end].to_string()
+    };
+
+    let mut full = Vec::with_capacity(part_size * n_parts);
+    let mut completed_parts = String::new();
+    for part_number in 1..=n_parts {
+        // Deterministic, part-distinct data so boundary slices are unambiguous.
+        let part: Vec<u8> = (0..part_size)
+            .map(|i| ((i + part_number * 37) % 251) as u8)
+            .collect();
+        full.extend_from_slice(&part);
+        let up = http
+            .put(format!(
+                "{}/{}/{}?partNumber={}&uploadId={}",
+                base_url, bucket, key, part_number, upload_id
+            ))
+            .body(part)
+            .send()
+            .await
+            .expect("UploadPart");
+        assert_eq!(up.status(), 200, "UploadPart {} status", part_number);
+        let etag = up
+            .headers()
+            .get("ETag")
+            .and_then(|v| v.to_str().ok())
+            .expect("ETag")
+            .trim_matches('"')
+            .to_string();
+        completed_parts.push_str(&format!(
+            "  <Part><PartNumber>{}</PartNumber><ETag>\"{}\"</ETag></Part>\n",
+            part_number, etag
+        ));
+    }
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload>\n{}</CompleteMultipartUpload>",
+        completed_parts
+    );
+    let complete = http
+        .post(format!(
+            "{}/{}/{}?uploadId={}",
+            base_url, bucket, key, upload_id
+        ))
+        .header("Content-Type", "application/xml")
+        .body(complete_xml)
+        .send()
+        .await
+        .expect("CompleteMultipartUpload");
+    assert_eq!(
+        complete.status(),
+        200,
+        "CompleteMultipartUpload status {}",
+        complete.status()
+    );
+    full
+}
+
+// ---------------------------------------------------------------------------
+// Test: multipart-SSE objects are chunked (v2) and support seekable range-GET.
+//
+// A 6 MiB multipart upload (2 x 3 MiB parts) assembled and post-encrypted with the
+// chunked format yields two AES-256-GCM chunks (5 MiB + 1 MiB). A range-GET landing
+// entirely in the second chunk must read only that chunk's ciphertext (seekable),
+// and a range crossing the 5 MiB chunk boundary must stitch the two chunks. HEAD and
+// full-GET must report the PLAINTEXT size (6_291_456), not the larger ciphertext size.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_multipart_sse_seekable_multichunk() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let bucket = format!("sse-mp-multichunk-{}", uuid::Uuid::new_v4());
+    let key = "mp-multichunk-object";
+    let base_url = &server.base_url;
+    let http = reqwest::Client::new();
+
+    const THREE_MB: usize = 3 * 1024 * 1024;
+    let full = put_multipart_sse_object(&http, base_url, &bucket, key, THREE_MB, 2).await;
+    assert_eq!(full.len(), 6 * 1024 * 1024, "assembled plaintext size");
+
+    // HEAD reports the plaintext size (not the on-disk ciphertext size).
+    let head = http
+        .head(format!("{}/{}/{}", base_url, bucket, key))
+        .send()
+        .await
+        .expect("HEAD");
+    assert_eq!(head.status(), 200);
+    assert_eq!(
+        head.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some("6291456"),
+        "HEAD Content-Length must be the plaintext size"
+    );
+
+    // Range entirely within the second chunk ([5 MiB, 6 MiB)) — exercises a seekable
+    // read of only the second chunk's ciphertext (the whole point of chunked multipart).
+    let resp = http
+        .get(format!("{}/{}/{}", base_url, bucket, key))
+        .header("Range", "bytes=5400000-5400499")
+        .send()
+        .await
+        .expect("range-GET within chunk 1");
+    assert_eq!(resp.status(), 206);
+    assert_eq!(
+        resp.headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok()),
+        Some("bytes 5400000-5400499/6291456"),
+        "Content-Range denominator must be the plaintext size"
+    );
+    let body = resp.bytes().await.expect("body");
+    assert_eq!(body.as_ref(), &full[5400000..=5400499]);
+
+    // Range crossing the 5 MiB chunk boundary (5_242_880) — stitches chunk 0 + chunk 1.
+    let resp = http
+        .get(format!("{}/{}/{}", base_url, bucket, key))
+        .header("Range", "bytes=5242875-5242884")
+        .send()
+        .await
+        .expect("boundary-crossing range-GET");
+    assert_eq!(resp.status(), 206);
+    let body = resp.bytes().await.expect("body");
+    assert_eq!(body.as_ref(), &full[5242875..=5242884]);
+
+    // Full GET returns the whole plaintext.
+    let resp = http
+        .get(format!("{}/{}/{}", base_url, bucket, key))
+        .send()
+        .await
+        .expect("full GET");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some("6291456"),
+    );
+    let body = resp.bytes().await.expect("body");
+    assert_eq!(body.len(), full.len());
+    assert_eq!(body.as_ref(), full.as_slice());
+}
+
+// ---------------------------------------------------------------------------
+// Test: HEAD on a single-PUT SSE object reports the PLAINTEXT size.
+//
+// Regression guard for the HEAD/GET size inconsistency: PUT stores ciphertext
+// (plaintext + 16-byte GCM tag per chunk) and `meta.size` is the on-disk ciphertext
+// length. HEAD must report the plaintext size (sidecar-derived), matching GET.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_head_sse_reports_plaintext_size() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let bucket = format!("sse-head-size-{}", uuid::Uuid::new_v4());
+    let key = "head-size-object";
+    let base_url = &server.base_url;
+    let http = reqwest::Client::new();
+
+    let put_bucket = http
+        .put(format!("{}/{}", base_url, bucket))
+        .send()
+        .await
+        .expect("create bucket");
+    assert!(put_bucket.status().is_success());
+
+    let plaintext: Vec<u8> = (0..1000usize).map(|i| (i % 251) as u8).collect();
+    let put = http
+        .put(format!("{}/{}/{}", base_url, bucket, key))
+        .header("x-amz-server-side-encryption", "AES256")
+        .body(plaintext.clone())
+        .send()
+        .await
+        .expect("PUT");
+    assert_eq!(put.status(), 200);
+
+    let head = http
+        .head(format!("{}/{}/{}", base_url, bucket, key))
+        .send()
+        .await
+        .expect("HEAD");
+    assert_eq!(head.status(), 200);
+    assert_eq!(
+        head.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some("1000"),
+        "HEAD Content-Length must equal the plaintext size, not the ciphertext size"
+    );
+
+    // GET must agree on size and content.
+    let get = http
+        .get(format!("{}/{}/{}", base_url, bucket, key))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(get.status(), 200);
+    assert_eq!(
+        get.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some("1000"),
+    );
+    let body = get.bytes().await.expect("body");
+    assert_eq!(body.as_ref(), plaintext.as_slice());
 }

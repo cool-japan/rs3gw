@@ -99,6 +99,7 @@ pub async fn setup_test_server() -> (Client, TempDir, TestServer) {
     let select_result_cache =
         std::sync::Arc::new(rs3gw::api::SelectResultCache::new(100, 10 * 1024 * 1024));
 
+    #[cfg(feature = "formats")]
     let query_intelligence = std::sync::Arc::new(rs3gw::api::QueryIntelligence::new());
 
     let training_path = temp_dir.path().join("training");
@@ -112,13 +113,16 @@ pub async fn setup_test_server() -> (Client, TempDir, TestServer) {
         throttle: None,
         quota: None,
         event_broadcaster: rs3gw::api::EventBroadcaster::new(),
+        #[cfg(feature = "formats")]
         query_plan_cache: None,
         select_result_cache,
+        #[cfg(feature = "formats")]
         query_intelligence,
         advanced_replication: None,
         preprocessing_manager,
         predictive_analytics,
         metrics_tracker,
+        usage_tracker: std::sync::Arc::new(rs3gw::observability::UsageTracker::new()),
         training_manager,
         start_time: std::time::Instant::now(),
         verifier: None,
@@ -228,6 +232,7 @@ pub async fn setup_test_server_with_auth() -> (Client, TempDir, TestServer) {
     let select_result_cache =
         std::sync::Arc::new(rs3gw::api::SelectResultCache::new(100, 10 * 1024 * 1024));
 
+    #[cfg(feature = "formats")]
     let query_intelligence = std::sync::Arc::new(rs3gw::api::QueryIntelligence::new());
 
     let training_path = temp_dir.path().join("training");
@@ -241,13 +246,16 @@ pub async fn setup_test_server_with_auth() -> (Client, TempDir, TestServer) {
         throttle: None,
         quota: None,
         event_broadcaster: rs3gw::api::EventBroadcaster::new(),
+        #[cfg(feature = "formats")]
         query_plan_cache: None,
         select_result_cache,
+        #[cfg(feature = "formats")]
         query_intelligence,
         advanced_replication: None,
         preprocessing_manager,
         predictive_analytics,
         metrics_tracker,
+        usage_tracker: std::sync::Arc::new(rs3gw::observability::UsageTracker::new()),
         training_manager,
         start_time: std::time::Instant::now(),
         verifier: None,
@@ -331,6 +339,7 @@ pub async fn setup_test_server_with_cors_middleware() -> (Client, TempDir, TestS
     let metrics_tracker = std::sync::Arc::new(rs3gw::observability::MetricsTracker::new());
     let select_result_cache =
         std::sync::Arc::new(rs3gw::api::SelectResultCache::new(100, 10 * 1024 * 1024));
+    #[cfg(feature = "formats")]
     let query_intelligence = std::sync::Arc::new(rs3gw::api::QueryIntelligence::new());
     let training_path = temp_dir.path().join("training");
     let training_manager = std::sync::Arc::new(rs3gw::storage::TrainingManager::new(training_path));
@@ -343,13 +352,16 @@ pub async fn setup_test_server_with_cors_middleware() -> (Client, TempDir, TestS
         throttle: None,
         quota: None,
         event_broadcaster: rs3gw::api::EventBroadcaster::new(),
+        #[cfg(feature = "formats")]
         query_plan_cache: None,
         select_result_cache,
+        #[cfg(feature = "formats")]
         query_intelligence,
         advanced_replication: None,
         preprocessing_manager,
         predictive_analytics,
         metrics_tracker,
+        usage_tracker: std::sync::Arc::new(rs3gw::observability::UsageTracker::new()),
         training_manager,
         start_time: std::time::Instant::now(),
         verifier: None,

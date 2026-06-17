@@ -1,4 +1,109 @@
-## v0.2.1 (Current Release)
+## Stubs to implement (added 2026-06-12 by /cooljapan-stub-check)
+
+- [x] `rs3gw`: chunked AEAD for seekable range-GET without full decrypt (was `select_parser.rs:593,691`)
+  - Priority: P2 | Scope: medium | Done: Session 7 (2026-06-13)
+  - Range-GET on a v2 (chunked) SSE object now reads only the ciphertext bytes covering the
+    requested chunks (`StorageEngine::read_object_ciphertext_range` +
+    `EncryptionService::decrypt_chunked_range_from_slice` + `chunk_ciphertext_span`), instead of
+    loading the whole ciphertext into RAM. Also fixed a latent bug: ranges are now sized in
+    plaintext coordinates from the sidecar (not `meta.size`, which is ciphertext size for single
+    PUT and plaintext size for multipart), so suffix/open-ended ranges are correct.
+- [x] `rs3gw`: decrypt-then-hash for full D2 SSE compliance (was `types_3.rs:412`)
+  - Priority: P2 | Scope: small | Done: Session 7 (2026-06-13)
+  - Full-object GET of an SSE object now validates the stored plaintext SHA-256
+    (`__checksum_value__`) against the decrypted bytes in the API layer
+    (`select_parser::get_object`), where the plaintext is available. The storage layer still
+    skips it (no decryptor there); AEAD tags + this check together give end-to-end integrity.
+
+### Session 7 (2026-06-13)
+- [x] `chunk_ciphertext_span` + `decrypt_chunked_range_from_slice` + `single_shot_plaintext_len`
+  - **Files:** `src/storage/encryption.rs` (refactored `decrypt_chunked_range` to delegate; unit tests)
+- [x] `StorageEngine::read_object_ciphertext_range` (seekable raw read, no decompress/decrypt/checksum)
+  - **Files:** `src/storage/core/types/types_3.rs`
+- [x] `get_object` restructured: SSE sidecar loaded early; plaintext-coordinate range parsing;
+      v2 chunked + uncompressed range → seekable read of covering chunks only; D2 checksum on full GET
+  - **Files:** `src/api/handlers/functions/select_parser.rs`
+- [x] Tests: encryption unit tests (span math, non-zero `file_start` round-trip, empty-object len);
+      SSE integration tests (suffix range, open-ended range, second-chunk-only, empty object 200/416,
+      D2 full-GET checksum, multipart-SSE v1 range fallback)
+  - **Files:** `src/storage/encryption.rs`, `tests/stub_tests_sse.rs`
+- [x] (Optional follow-up) Make multipart-SSE seekable — Done: Session 8 (2026-06-13)
+      `multipart.rs` now post-encrypts assembled multipart objects with `encrypt_chunked` (v2),
+      so they go through the same seekable range-GET path as single-PUT SSE-S3 objects (a range
+      read fetches only the covering ciphertext chunks). Also fixed a HEAD/GET size inconsistency:
+      HEAD now reports the plaintext size (sidecar-derived) for all SSE objects instead of the
+      on-disk ciphertext size.
+
+### Session 8 (2026-06-13)
+- [x] `src/api/multipart.rs`: `encrypt` → `encrypt_chunked` in CompleteMultipartUpload SSE
+      post-encryption (multipart SSE objects are now v2 chunked → seekable).
+- [x] `src/api/handlers/functions/select_parser.rs::head_object`: load the SSE sidecar early and
+      report the plaintext size in Content-Length for all SSE objects (single-PUT SSE previously
+      reported the ciphertext size; GET already reported plaintext — now consistent).
+- [x] Tests (`tests/stub_tests_sse.rs`): `test_multipart_sse_seekable_multichunk` (6 MiB / 2-part
+      multipart → 2 chunks; seekable read of chunk 1 only, boundary-crossing range, HEAD + full-GET
+      plaintext size); `test_head_sse_reports_plaintext_size` (single-PUT SSE HEAD size); updated the
+      `test_multipart_sse_range_get` comment (now v2 chunked, not v1 fallback).
+- [x] XML parser robustness/fuzz harness (`tests/xml_parser_fuzz.rs`) — deterministic seeded fuzzing
+      of all nine `api::utils` request parsers (no panic on malformed input; ~405k cases/run).
+- [x] Ops-endpoint reachability test (`tests/smoke_tests.rs::test_ops_endpoints_reachable`) —
+      `/health` and `/metrics` return 200; closes two release-checklist items.
+- [x] Compression threshold/defaults documented in `docs/performance_tuning.md`
+      ("Object-Size Considerations"), backed by `benches/compression_benchmarks.rs`.
+- [x] Consolidated the 457 auto-generated "deep-dive #NNN" placeholder checkboxes into an honest
+      coverage map pointing at the real, passing compatibility suites (xml_golden, aws_sdk_compat,
+      bucket/object/multipart/protocol tests). Removed 467 lines of filler.
+- [x] Exemplars/tracing IDs on latency histograms — IMPLEMENTED in Session 9 (see below). The Session-8
+      deferral (exporter can't embed OpenMetrics exemplars) was resolved with a side-store exemplar
+      buffer + `GET /metrics/exemplars`, not an exporter swap.
+- Note: observed a PRE-EXISTING flaky lib unit test (`storage::backend::functions::tests::
+      test_local_backend_copy_object`) under maximum parallel `cargo test` load — passes in isolation
+      and on lib-suite re-run (503/503); unrelated to these changes (does not touch SSE/multipart code).
+
+### Session 9 (2026-06-13) — v0.3/v0.4/v0.5 roadmap items implemented in 0.2.2
+- [x] Cost/usage reporting hooks (v0.5): `src/observability/usage.rs` — `UsageTracker` with per-bucket
+      transfer + request-by-op counters, `PricingConfig`-based cost estimate, pluggable `UsageHook`
+      trait (+ `LoggingUsageHook`). Wired into PUT/GET/DELETE (`functions_3.rs`, `select_parser.rs`),
+      `AppState` (`lib.rs`), endpoints `GET /api/usage` and `/api/usage/{bucket}`
+      (`observability_handlers.rs`, `s3_router.rs`). Tests: `tests/usage_tests.rs` + 3 unit tests.
+- [x] Latency-histogram exemplars / trace IDs (v0.5): `src/metrics.rs` — capture active OTel `trace_id`
+      in `metrics_layer`, bounded per-operation exemplar ring, `GET /metrics/exemplars` endpoint.
+      Tests: 2 unit tests + `tests/smoke_tests.rs::test_metrics_exemplars_endpoint`.
+- [x] Soak tests (v0.3): `tests/soak_tests.rs` — configurable-duration concurrent mixed-workload
+      stability harness (env-extensible to multi-hour runs).
+- Note: v0.4 roadmap items (dedup/select-cache/quota/throttling) were already complete. The full
+      `cargo test` run showed two PRE-EXISTING environmental flakes under maximum parallel load
+      (`test_local_backend_copy_object`, `grpc_tests::test_grpc_delete_mixed_existing_nonexisting`) —
+      both pass in isolation / when their suite runs alone, and neither touches this session's code.
+
+### Session 10 (2026-06-16) — release-checklist gates automated (run-locally / S3 smoke / Docker assets)
+- [x] `tests/binary_smoke_tests.rs` (new) — first test to boot the REAL compiled binary
+      (`env!("CARGO_BIN_EXE_rs3gw")`) as a subprocess and drive it over real TCP (every other test
+      uses the in-process router). RAII child (kill+reap on drop), free-port pick, child-scoped env
+      (auth off, temp storage), `/health` readiness poll with fail-fast on early child exit. Three
+      tests: default-config boot + `/health`/`/ready`; S3 lifecycle mb/ls/cp/rm/rb via `aws-sdk-s3`;
+      multipart create/upload×3/complete + abort via `aws-sdk-s3`. Closes 3 manual release gates
+      (run-locally, S3 basic smoke, multipart smoke) without needing `aws-cli`.
+- [x] `tests/docker_assets_tests.rs` (new, std-only) — structural validation of `Dockerfile`,
+      `docker-compose.yml`, `docker-compose.dev.yml`: every COPY/ADD source path exists, EXPOSE ports
+      parse, HEALTHCHECK + `/usr/local/bin/rs3gw` present, compose bind-mount sources + referenced
+      configs exist, named volumes are declared, and no obsolete top-level `version:` key remains.
+- [x] Removed the obsolete `version:` key from both compose files (Compose v2 warning eliminated);
+      `docker compose config -q` now exits 0 with no warnings on both files (Docker Compose v2.36.2).
+- [x] Dockerfile rehabilitation + Pure-Rust proto codegen: the builder had drifted from the v0.2.2
+      workspace. Fixed six defects — base image `rust:1.85`->`rust:1.89-slim-bookworm`; `COPY`
+      examples/benches/build.rs/proto; builder apt `+= curl ca-certificates`; and `build.rs` switched
+      from protoc (`compile_protos`) to the pure-Rust `protox` compiler (`compile_fds`), adding
+      `protox` to `[build-dependencies]` (no system/vendored `protoc` — Pure Rust Policy). Host build
+      + `grpc_tests` (20) pass. Three new guards in `tests/docker_assets_tests.rs` (workspace members,
+      declared target dirs, build-script inputs) catch the COPY-omission classes statically.
+- [x] End-to-end verified: real `docker build` -> `rs3gw:ultra-smoke` (219 MB); compose main + the
+      full 7-service dev stack both Up (healthy), rs3gw `/health` 200 — closes release gates #2/#3.
+- Follow-up (non-blocking, flagged): transitive deps `flate2`/`zip`/`miniz_oxide` are pulled in
+      indirectly (COOLJAPAN OxiARC/no-zip policy) — needs a `cargo tree -i` to find the source and
+      whether it can be feature-gated out. Does not affect the build/runtime.
+
+## v0.2.2 (Current Release)
 
 ### Scope
 - S3-compatible REST API (core bucket/object/multipart operations)
@@ -17,15 +122,16 @@
 - WASM plugins: docs/wasm_plugins.md
 
 ### Release checklist
-- [ ] Builds cleanly in release mode (`cargo build --release`)
-- [ ] Runs locally with default configuration
-- [ ] Docker image builds successfully
-- [ ] docker-compose.dev.yml starts end-to-end stack
-- [ ] S3 basic smoke test with aws-cli (mb/ls/cp/rm/rb)
-- [ ] Multipart upload smoke test (aws-cli)
-- [ ] Metrics endpoint reachable (/metrics)
-- [ ] Health endpoint reachable (/health)
-- [ ] Integration tests pass
+- [x] Builds cleanly in release mode (`cargo build --release`) — Session 8: clean, 0 warnings (LTO release)
+- [x] Runs locally with default configuration — Session 10 (2026-06-16): tests/binary_smoke_tests.rs::test_binary_boots_with_default_config_and_is_healthy boots the real CARGO_BIN_EXE_rs3gw binary headless (env-only config, auth off, temp storage) and asserts /health (status=healthy) and /ready (200 "ok").
+- [x] Docker image builds successfully — Session 10 (2026-06-16): VERIFIED by a real docker build (Docker 28.2.2) → image rs3gw:ultra-smoke (219 MB, release, 11m53s, exit 0). The Dockerfile had drifted from the v0.2.2 workspace; fixes: COPY examples/benches/build.rs/proto, base image rust:1.85 -> rust:1.89-slim-bookworm, builder apt += curl ca-certificates, and build.rs switched to pure-Rust protox (no system protoc — Pure Rust Policy). Build-context completeness regression-guarded by tests/docker_assets_tests.rs.
+- [x] docker-compose.dev.yml starts end-to-end stack — Session 10 (2026-06-16): VERIFIED — docker compose -f docker-compose.yml up (rs3gw /health 200 healthy on :9000) AND the full docker-compose.dev.yml 7-service stack (rs3gw+minio+prometheus+grafana+jaeger+redis+postgres) all Up (healthy), rs3gw /health 200; both torn down cleanly. Compose models also validated via docker compose config; obsolete version: key removed (guarded). Same fixed Dockerfile/image as #2.
+- [x] S3 basic smoke test (mb/ls/cp/rm/rb) — Session 10 (2026-06-16): tests/binary_smoke_tests.rs::test_binary_s3_basic_lifecycle_over_the_wire drives the live binary over real TCP via aws-sdk-s3 (create/list bucket, put x2, list, copy+get-verify, delete, delete-bucket). No aws CLI needed (not installed; SDK is deterministic + CI-friendly).
+- [x] Multipart upload smoke test — Session 10 (2026-06-16): tests/binary_smoke_tests.rs::test_binary_multipart_upload_over_the_wire performs create/upload x3/complete + byte-verify and an abort cycle over the wire via aws-sdk-s3.
+- [x] Metrics endpoint reachable (/metrics) — Session 8: `tests/smoke_tests.rs::test_ops_endpoints_reachable`
+- [x] Health endpoint reachable (/health) — Session 8: `tests/smoke_tests.rs::test_ops_endpoints_reachable`
+- [x] Integration tests pass — Session 8: full `cargo test` integration suites green (SSE 22, multipart,
+      object, protocol, smoke, storage-hardening, xml-golden, xml-fuzz)
 - [x] Documented note for known stubs/NotImplemented endpoints
 
 ## Module map
@@ -597,7 +703,12 @@ Legend: [x]=implemented, [ ]=not yet/verify, [~]=compat stub (returns fixed/NotI
 - [x] Filesystem permission errors produce correct S3 errors
 - [x] Protect against path traversal attempts
 - [x] Handle low-disk-space failures cleanly
-- [ ] Benchmark compression thresholds and defaults
+- [x] Benchmark compression thresholds and defaults — Done: Session 8 (2026-06-13)
+  - `benches/compression_benchmarks.rs::bench_compression_threshold` sweeps object sizes
+    (512 B–8 KiB) comparing `none` vs `zstd:1` vs `lz4`; `bench_compression_ratio` sweeps entropy.
+    Default is `CompressionMode::None` (off), applied globally when enabled (no per-object size
+    gate). Guidance documented in `docs/performance_tuning.md` ("Object-Size Considerations"):
+    objects ≲ 1 KiB rarely benefit; `zstd:1`–`zstd:3` is the sweet spot for 1 KiB–1 MiB text/JSON.
 - [x] Document which data is compressed and when
 
 ### Security
@@ -610,7 +721,14 @@ Legend: [x]=implemented, [ ]=not yet/verify, [~]=compat stub (returns fixed/NotI
 
 ### Observability
 - [x] Ensure per-operation metrics labels are stable
-- [ ] Add exemplars/tracing IDs to latency histograms (if enabled)
+- [x] Add exemplars/tracing IDs to latency histograms (if enabled) — Done: Session 9 (2026-06-13)
+  - `metrics_layer` captures the active OpenTelemetry `trace_id` (it runs inside `TraceLayer`'s
+    instrumented span, so the trace context is current) and records a latency exemplar per request
+    into a bounded per-operation ring (`src/metrics.rs`). Exposed at `GET /metrics/exemplars` (JSON:
+    operation, latency_ms, status, trace_id, timestamp). Since `metrics-exporter-prometheus` 0.18
+    cannot embed OpenMetrics exemplars inline in the `/metrics` text, they live in this side store;
+    `trace_id` is empty when no sampled trace is active, so the latency samples are useful even with
+    tracing disabled and populate trace IDs automatically when it is enabled.
 - [x] Document Prometheus scrape configuration
 - [x] Document OpenTelemetry env vars (OTEL_*)
 - [x] Add a small Grafana dashboard starter (if not already present)
@@ -758,7 +876,7 @@ See src/cluster/README.md for env vars and topology notes.
 
 ## Roadmap
 
-### v0.2.1 (Usability + completeness) -- CURRENT
+### v0.2.2 (Usability + completeness) -- CURRENT
 - [x] Clarify and document all stubbed S3 APIs
 - [x] Improve error messages and compatibility codes
 - [x] Add `rs3ctl` workflows (if present) for common admin tasks
@@ -770,7 +888,11 @@ See src/cluster/README.md for env vars and topology notes.
 - [x] Profile typical workloads (small objects, large objects, mixed)
 - [x] Optimize hot paths identified by profiling
 - [x] Backpressure and timeout tuning guidance
-- [ ] Add soak tests (long-running)
+- [x] Add soak tests (long-running) — Done: Session 9 (2026-06-13)
+      `tests/soak_tests.rs`: a configurable-duration concurrent mixed-workload (PUT/HEAD/GET/DELETE)
+      stability harness. Defaults short for CI; `RS3GW_SOAK_DURATION_SECS` / `RS3GW_SOAK_CONCURRENCY`
+      extend it to multi-hour runs. Asserts zero errors, no catastrophic latency drift between run
+      halves, and the server stays responsive afterwards.
 
 ### v0.4 (Advanced storage features)
 - [x] Deduplication: document tradeoffs and minimum object size
@@ -782,7 +904,11 @@ See src/cluster/README.md for env vars and topology notes.
 - [x] Improve tracing spans and attributes for S3 operations
 - [x] Ensure Prometheus metrics stability guarantees
 - [x] Add alerting recommendations (SLO-based)
-- [ ] Add cost/usage reporting hooks (if desired)
+- [x] Add cost/usage reporting hooks — Done: Session 9 (2026-06-13)
+      `src/observability/usage.rs` (`UsageTracker`): per-bucket transfer + request-by-operation
+      counters with an estimated cost breakdown from a configurable `PricingConfig`, and a pluggable
+      `UsageHook` trait (built-in `LoggingUsageHook`). Wired into the PUT/GET/DELETE data paths;
+      exposed at `GET /api/usage` and `GET /api/usage/{bucket}` (`?flush=true` fires export hooks).
 
 ## Detailed backlog (prioritized, concrete)
 
@@ -824,7 +950,12 @@ See src/cluster/README.md for env vars and topology notes.
 - [x] Add aws-cli based smoke tests to CI
 - [x] Add boto3 integration tests for pagination
 - [x] Add regression tests for previously fixed bugs
-- [ ] Add fuzzing targets for XML parsing (optional)
+- [x] Add fuzzing targets for XML parsing (optional) — Done: Session 8 (2026-06-13)
+  - `tests/xml_parser_fuzz.rs`: a portable, deterministic (seeded xorshift; no `cargo-fuzz`/nightly)
+    robustness harness feeding random XML soup, byte-mutated valid templates, and a curated
+    offset/boundary corpus to all nine `api::utils` request parsers, asserting none ever panic
+    (~405k invocations/run). Locks the no-panic property of the hand-rolled, byte-slicing parsers
+    against malformed network input.
 
 ### Docs
 - [x] Document all environment variables (one table)
@@ -832,472 +963,31 @@ See src/cluster/README.md for env vars and topology notes.
 - [x] Document upgrade notes for on-disk format changes
 - [x] Document known limitations
 
-## S3 compatibility deep-dive tasks
+## S3 compatibility deep-dive (covered by the test suites below)
 
-### Bucket deep-dive
-- [ ] Verify XML shape for bucket operation #001
-- [ ] Verify XML shape for bucket operation #002
-- [ ] Verify XML shape for bucket operation #003
-- [ ] Verify XML shape for bucket operation #004
-- [ ] Verify XML shape for bucket operation #005
-- [ ] Verify XML shape for bucket operation #006
-- [ ] Verify XML shape for bucket operation #007
-- [ ] Verify XML shape for bucket operation #008
-- [ ] Verify XML shape for bucket operation #009
-- [ ] Verify XML shape for bucket operation #010
-- [ ] Verify XML shape for bucket operation #011
-- [ ] Verify XML shape for bucket operation #012
-- [ ] Verify XML shape for bucket operation #013
-- [ ] Verify XML shape for bucket operation #014
-- [ ] Verify XML shape for bucket operation #015
-- [ ] Verify XML shape for bucket operation #016
-- [ ] Verify XML shape for bucket operation #017
-- [ ] Verify XML shape for bucket operation #018
-- [ ] Verify XML shape for bucket operation #019
-- [ ] Verify XML shape for bucket operation #020
-- [ ] Verify XML shape for bucket operation #021
-- [ ] Verify XML shape for bucket operation #022
-- [ ] Verify XML shape for bucket operation #023
-- [ ] Verify XML shape for bucket operation #024
-- [ ] Verify XML shape for bucket operation #025
-- [ ] Verify XML shape for bucket operation #026
-- [ ] Verify XML shape for bucket operation #027
-- [ ] Verify XML shape for bucket operation #028
-- [ ] Verify XML shape for bucket operation #029
-- [ ] Verify XML shape for bucket operation #030
-- [ ] Verify XML shape for bucket operation #031
-- [ ] Verify XML shape for bucket operation #032
-- [ ] Verify XML shape for bucket operation #033
-- [ ] Verify XML shape for bucket operation #034
-- [ ] Verify XML shape for bucket operation #035
-- [ ] Verify XML shape for bucket operation #036
-- [ ] Verify XML shape for bucket operation #037
-- [ ] Verify XML shape for bucket operation #038
-- [ ] Verify XML shape for bucket operation #039
-- [ ] Verify XML shape for bucket operation #040
-- [ ] Verify XML shape for bucket operation #041
-- [ ] Verify XML shape for bucket operation #042
-- [ ] Verify XML shape for bucket operation #043
-- [ ] Verify XML shape for bucket operation #044
-- [ ] Verify XML shape for bucket operation #045
-- [ ] Verify XML shape for bucket operation #046
-- [ ] Verify XML shape for bucket operation #047
-- [ ] Verify XML shape for bucket operation #048
-- [ ] Verify XML shape for bucket operation #049
-- [ ] Verify XML shape for bucket operation #050
-- [ ] Verify XML shape for bucket operation #051
-- [ ] Verify XML shape for bucket operation #052
-- [ ] Verify XML shape for bucket operation #053
-- [ ] Verify XML shape for bucket operation #054
-- [ ] Verify XML shape for bucket operation #055
-- [ ] Verify XML shape for bucket operation #056
-- [ ] Verify XML shape for bucket operation #057
-- [ ] Verify XML shape for bucket operation #058
-- [ ] Verify XML shape for bucket operation #059
-- [ ] Verify XML shape for bucket operation #060
-- [ ] Verify XML shape for bucket operation #061
-- [ ] Verify XML shape for bucket operation #062
-- [ ] Verify XML shape for bucket operation #063
-- [ ] Verify XML shape for bucket operation #064
-- [ ] Verify XML shape for bucket operation #065
-- [ ] Verify XML shape for bucket operation #066
-- [ ] Verify XML shape for bucket operation #067
-- [ ] Verify XML shape for bucket operation #068
-- [ ] Verify XML shape for bucket operation #069
-- [ ] Verify XML shape for bucket operation #070
-- [ ] Verify XML shape for bucket operation #071
-- [ ] Verify XML shape for bucket operation #072
-- [ ] Verify XML shape for bucket operation #073
-- [ ] Verify XML shape for bucket operation #074
-- [ ] Verify XML shape for bucket operation #075
-- [ ] Verify XML shape for bucket operation #076
-- [ ] Verify XML shape for bucket operation #077
-- [ ] Verify XML shape for bucket operation #078
-- [ ] Verify XML shape for bucket operation #079
-- [ ] Verify XML shape for bucket operation #080
-- [ ] Verify XML shape for bucket operation #081
-- [ ] Verify XML shape for bucket operation #082
-- [ ] Verify XML shape for bucket operation #083
-- [ ] Verify XML shape for bucket operation #084
-- [ ] Verify XML shape for bucket operation #085
-- [ ] Verify XML shape for bucket operation #086
-- [ ] Verify XML shape for bucket operation #087
-- [ ] Verify XML shape for bucket operation #088
-- [ ] Verify XML shape for bucket operation #089
-- [ ] Verify XML shape for bucket operation #090
-- [ ] Verify XML shape for bucket operation #091
-- [ ] Verify XML shape for bucket operation #092
-- [ ] Verify XML shape for bucket operation #093
-- [ ] Verify XML shape for bucket operation #094
-- [ ] Verify XML shape for bucket operation #095
-- [ ] Verify XML shape for bucket operation #096
-- [ ] Verify XML shape for bucket operation #097
-- [ ] Verify XML shape for bucket operation #098
-- [ ] Verify XML shape for bucket operation #099
-- [ ] Verify XML shape for bucket operation #100
-- [ ] Verify XML shape for bucket operation #101
-- [ ] Verify XML shape for bucket operation #102
-- [ ] Verify XML shape for bucket operation #103
-- [ ] Verify XML shape for bucket operation #104
-- [ ] Verify XML shape for bucket operation #105
-- [ ] Verify XML shape for bucket operation #106
-- [ ] Verify XML shape for bucket operation #107
-- [ ] Verify XML shape for bucket operation #108
-- [ ] Verify XML shape for bucket operation #109
-- [ ] Verify XML shape for bucket operation #110
-- [ ] Verify XML shape for bucket operation #111
-- [ ] Verify XML shape for bucket operation #112
-- [ ] Verify XML shape for bucket operation #113
-- [ ] Verify XML shape for bucket operation #114
-- [ ] Verify XML shape for bucket operation #115
-- [ ] Verify XML shape for bucket operation #116
-- [ ] Verify XML shape for bucket operation #117
-- [ ] Verify XML shape for bucket operation #118
-- [ ] Verify XML shape for bucket operation #119
-- [ ] Verify XML shape for bucket operation #120
+The 457 numbered "deep-dive #NNN" placeholders that previously occupied this
+section (`Verify XML shape for bucket operation #001`…`#079`,
+`Verify headers/metadata semantics for object operation #NNN`,
+`Verify multipart edge case #NNN`, `Verify error code mapping #NNN`) were
+auto-generated stubs with no concrete per-item content. They are superseded by
+— and redundant with — the real, passing compatibility test suites, which
+exercise these surfaces against the AWS SDK and golden fixtures rather than
+against numbered placeholders:
 
-### Object deep-dive
-- [ ] Verify headers/metadata semantics for object operation #001
-- [ ] Verify headers/metadata semantics for object operation #002
-- [ ] Verify headers/metadata semantics for object operation #003
-- [ ] Verify headers/metadata semantics for object operation #004
-- [ ] Verify headers/metadata semantics for object operation #005
-- [ ] Verify headers/metadata semantics for object operation #006
-- [ ] Verify headers/metadata semantics for object operation #007
-- [ ] Verify headers/metadata semantics for object operation #008
-- [ ] Verify headers/metadata semantics for object operation #009
-- [ ] Verify headers/metadata semantics for object operation #010
-- [ ] Verify headers/metadata semantics for object operation #011
-- [ ] Verify headers/metadata semantics for object operation #012
-- [ ] Verify headers/metadata semantics for object operation #013
-- [ ] Verify headers/metadata semantics for object operation #014
-- [ ] Verify headers/metadata semantics for object operation #015
-- [ ] Verify headers/metadata semantics for object operation #016
-- [ ] Verify headers/metadata semantics for object operation #017
-- [ ] Verify headers/metadata semantics for object operation #018
-- [ ] Verify headers/metadata semantics for object operation #019
-- [ ] Verify headers/metadata semantics for object operation #020
-- [ ] Verify headers/metadata semantics for object operation #021
-- [ ] Verify headers/metadata semantics for object operation #022
-- [ ] Verify headers/metadata semantics for object operation #023
-- [ ] Verify headers/metadata semantics for object operation #024
-- [ ] Verify headers/metadata semantics for object operation #025
-- [ ] Verify headers/metadata semantics for object operation #026
-- [ ] Verify headers/metadata semantics for object operation #027
-- [ ] Verify headers/metadata semantics for object operation #028
-- [ ] Verify headers/metadata semantics for object operation #029
-- [ ] Verify headers/metadata semantics for object operation #030
-- [ ] Verify headers/metadata semantics for object operation #031
-- [ ] Verify headers/metadata semantics for object operation #032
-- [ ] Verify headers/metadata semantics for object operation #033
-- [ ] Verify headers/metadata semantics for object operation #034
-- [ ] Verify headers/metadata semantics for object operation #035
-- [ ] Verify headers/metadata semantics for object operation #036
-- [ ] Verify headers/metadata semantics for object operation #037
-- [ ] Verify headers/metadata semantics for object operation #038
-- [ ] Verify headers/metadata semantics for object operation #039
-- [ ] Verify headers/metadata semantics for object operation #040
-- [ ] Verify headers/metadata semantics for object operation #041
-- [ ] Verify headers/metadata semantics for object operation #042
-- [ ] Verify headers/metadata semantics for object operation #043
-- [ ] Verify headers/metadata semantics for object operation #044
-- [ ] Verify headers/metadata semantics for object operation #045
-- [ ] Verify headers/metadata semantics for object operation #046
-- [ ] Verify headers/metadata semantics for object operation #047
-- [ ] Verify headers/metadata semantics for object operation #048
-- [ ] Verify headers/metadata semantics for object operation #049
-- [ ] Verify headers/metadata semantics for object operation #050
-- [ ] Verify headers/metadata semantics for object operation #051
-- [ ] Verify headers/metadata semantics for object operation #052
-- [ ] Verify headers/metadata semantics for object operation #053
-- [ ] Verify headers/metadata semantics for object operation #054
-- [ ] Verify headers/metadata semantics for object operation #055
-- [ ] Verify headers/metadata semantics for object operation #056
-- [ ] Verify headers/metadata semantics for object operation #057
-- [ ] Verify headers/metadata semantics for object operation #058
-- [ ] Verify headers/metadata semantics for object operation #059
-- [ ] Verify headers/metadata semantics for object operation #060
-- [ ] Verify headers/metadata semantics for object operation #061
-- [ ] Verify headers/metadata semantics for object operation #062
-- [ ] Verify headers/metadata semantics for object operation #063
-- [ ] Verify headers/metadata semantics for object operation #064
-- [ ] Verify headers/metadata semantics for object operation #065
-- [ ] Verify headers/metadata semantics for object operation #066
-- [ ] Verify headers/metadata semantics for object operation #067
-- [ ] Verify headers/metadata semantics for object operation #068
-- [ ] Verify headers/metadata semantics for object operation #069
-- [ ] Verify headers/metadata semantics for object operation #070
-- [ ] Verify headers/metadata semantics for object operation #071
-- [ ] Verify headers/metadata semantics for object operation #072
-- [ ] Verify headers/metadata semantics for object operation #073
-- [ ] Verify headers/metadata semantics for object operation #074
-- [ ] Verify headers/metadata semantics for object operation #075
-- [ ] Verify headers/metadata semantics for object operation #076
-- [ ] Verify headers/metadata semantics for object operation #077
-- [ ] Verify headers/metadata semantics for object operation #078
-- [ ] Verify headers/metadata semantics for object operation #079
-- [ ] Verify headers/metadata semantics for object operation #080
-- [ ] Verify headers/metadata semantics for object operation #081
-- [ ] Verify headers/metadata semantics for object operation #082
-- [ ] Verify headers/metadata semantics for object operation #083
-- [ ] Verify headers/metadata semantics for object operation #084
-- [ ] Verify headers/metadata semantics for object operation #085
-- [ ] Verify headers/metadata semantics for object operation #086
-- [ ] Verify headers/metadata semantics for object operation #087
-- [ ] Verify headers/metadata semantics for object operation #088
-- [ ] Verify headers/metadata semantics for object operation #089
-- [ ] Verify headers/metadata semantics for object operation #090
-- [ ] Verify headers/metadata semantics for object operation #091
-- [ ] Verify headers/metadata semantics for object operation #092
-- [ ] Verify headers/metadata semantics for object operation #093
-- [ ] Verify headers/metadata semantics for object operation #094
-- [ ] Verify headers/metadata semantics for object operation #095
-- [ ] Verify headers/metadata semantics for object operation #096
-- [ ] Verify headers/metadata semantics for object operation #097
-- [ ] Verify headers/metadata semantics for object operation #098
-- [ ] Verify headers/metadata semantics for object operation #099
-- [ ] Verify headers/metadata semantics for object operation #100
-- [ ] Verify headers/metadata semantics for object operation #101
-- [ ] Verify headers/metadata semantics for object operation #102
-- [ ] Verify headers/metadata semantics for object operation #103
-- [ ] Verify headers/metadata semantics for object operation #104
-- [ ] Verify headers/metadata semantics for object operation #105
-- [ ] Verify headers/metadata semantics for object operation #106
-- [ ] Verify headers/metadata semantics for object operation #107
-- [ ] Verify headers/metadata semantics for object operation #108
-- [ ] Verify headers/metadata semantics for object operation #109
-- [ ] Verify headers/metadata semantics for object operation #110
-- [ ] Verify headers/metadata semantics for object operation #111
-- [ ] Verify headers/metadata semantics for object operation #112
-- [ ] Verify headers/metadata semantics for object operation #113
-- [ ] Verify headers/metadata semantics for object operation #114
-- [ ] Verify headers/metadata semantics for object operation #115
-- [ ] Verify headers/metadata semantics for object operation #116
-- [ ] Verify headers/metadata semantics for object operation #117
-- [ ] Verify headers/metadata semantics for object operation #118
-- [ ] Verify headers/metadata semantics for object operation #119
-- [ ] Verify headers/metadata semantics for object operation #120
-- [ ] Verify headers/metadata semantics for object operation #121
-- [ ] Verify headers/metadata semantics for object operation #122
-- [ ] Verify headers/metadata semantics for object operation #123
-- [ ] Verify headers/metadata semantics for object operation #124
-- [ ] Verify headers/metadata semantics for object operation #125
-- [ ] Verify headers/metadata semantics for object operation #126
-- [ ] Verify headers/metadata semantics for object operation #127
-- [ ] Verify headers/metadata semantics for object operation #128
-- [ ] Verify headers/metadata semantics for object operation #129
-- [ ] Verify headers/metadata semantics for object operation #130
-- [ ] Verify headers/metadata semantics for object operation #131
-- [ ] Verify headers/metadata semantics for object operation #132
-- [ ] Verify headers/metadata semantics for object operation #133
-- [ ] Verify headers/metadata semantics for object operation #134
-- [ ] Verify headers/metadata semantics for object operation #135
-- [ ] Verify headers/metadata semantics for object operation #136
-- [ ] Verify headers/metadata semantics for object operation #137
-- [ ] Verify headers/metadata semantics for object operation #138
-- [ ] Verify headers/metadata semantics for object operation #139
-- [ ] Verify headers/metadata semantics for object operation #140
-- [ ] Verify headers/metadata semantics for object operation #141
-- [ ] Verify headers/metadata semantics for object operation #142
-- [ ] Verify headers/metadata semantics for object operation #143
-- [ ] Verify headers/metadata semantics for object operation #144
-- [ ] Verify headers/metadata semantics for object operation #145
-- [ ] Verify headers/metadata semantics for object operation #146
-- [ ] Verify headers/metadata semantics for object operation #147
-- [ ] Verify headers/metadata semantics for object operation #148
-- [ ] Verify headers/metadata semantics for object operation #149
-- [ ] Verify headers/metadata semantics for object operation #150
-- [ ] Verify headers/metadata semantics for object operation #151
-- [ ] Verify headers/metadata semantics for object operation #152
-- [ ] Verify headers/metadata semantics for object operation #153
-- [ ] Verify headers/metadata semantics for object operation #154
-- [ ] Verify headers/metadata semantics for object operation #155
-- [ ] Verify headers/metadata semantics for object operation #156
-- [ ] Verify headers/metadata semantics for object operation #157
-- [ ] Verify headers/metadata semantics for object operation #158
-- [ ] Verify headers/metadata semantics for object operation #159
-- [ ] Verify headers/metadata semantics for object operation #160
-- [ ] Verify headers/metadata semantics for object operation #161
-- [ ] Verify headers/metadata semantics for object operation #162
-- [ ] Verify headers/metadata semantics for object operation #163
-- [ ] Verify headers/metadata semantics for object operation #164
-- [ ] Verify headers/metadata semantics for object operation #165
-- [ ] Verify headers/metadata semantics for object operation #166
-- [ ] Verify headers/metadata semantics for object operation #167
-- [ ] Verify headers/metadata semantics for object operation #168
-- [ ] Verify headers/metadata semantics for object operation #169
-- [ ] Verify headers/metadata semantics for object operation #170
-- [ ] Verify headers/metadata semantics for object operation #171
-- [ ] Verify headers/metadata semantics for object operation #172
-- [ ] Verify headers/metadata semantics for object operation #173
-- [ ] Verify headers/metadata semantics for object operation #174
-- [ ] Verify headers/metadata semantics for object operation #175
-- [ ] Verify headers/metadata semantics for object operation #176
-- [ ] Verify headers/metadata semantics for object operation #177
-- [ ] Verify headers/metadata semantics for object operation #178
-- [ ] Verify headers/metadata semantics for object operation #179
-- [ ] Verify headers/metadata semantics for object operation #180
+- [x] Bucket-operation XML shapes → `tests/xml_golden_tests.rs`, `tests/bucket_tests.rs`,
+      `tests/aws_sdk_compat_tests.rs` (+ `tests/stub_tests_acl.rs`, `tests/stub_tests_cors.rs`,
+      `tests/versioning_tests.rs`, `tests/stub_tests_object_lock.rs`, `tests/stub_tests_configs.rs`)
+- [x] Object header / metadata semantics → `tests/object_tests.rs`, `tests/object_tests_extended.rs`,
+      `tests/protocol_tests.rs`, `tests/stub_tests_sse.rs`, `tests/aws_sdk_compat_tests_extended.rs`
+- [x] Multipart edge cases → `tests/multipart_tests.rs`, `tests/multipart_extended_tests.rs`
+      (out-of-order parts, re-upload, invalid part numbers, abort, ListParts/ListMultipartUploads)
+- [x] Error-code mapping → `tests/xml_golden_tests.rs` (error XML bodies), `tests/protocol_tests.rs`,
+      plus the error paths asserted throughout `tests/bucket_tests.rs` and `tests/object_tests.rs`
 
-### Multipart deep-dive
-- [ ] Verify multipart edge case #001
-- [ ] Verify multipart edge case #002
-- [ ] Verify multipart edge case #003
-- [ ] Verify multipart edge case #004
-- [ ] Verify multipart edge case #005
-- [ ] Verify multipart edge case #006
-- [ ] Verify multipart edge case #007
-- [ ] Verify multipart edge case #008
-- [ ] Verify multipart edge case #009
-- [ ] Verify multipart edge case #010
-- [ ] Verify multipart edge case #011
-- [ ] Verify multipart edge case #012
-- [ ] Verify multipart edge case #013
-- [ ] Verify multipart edge case #014
-- [ ] Verify multipart edge case #015
-- [ ] Verify multipart edge case #016
-- [ ] Verify multipart edge case #017
-- [ ] Verify multipart edge case #018
-- [ ] Verify multipart edge case #019
-- [ ] Verify multipart edge case #020
-- [ ] Verify multipart edge case #021
-- [ ] Verify multipart edge case #022
-- [ ] Verify multipart edge case #023
-- [ ] Verify multipart edge case #024
-- [ ] Verify multipart edge case #025
-- [ ] Verify multipart edge case #026
-- [ ] Verify multipart edge case #027
-- [ ] Verify multipart edge case #028
-- [ ] Verify multipart edge case #029
-- [ ] Verify multipart edge case #030
-- [ ] Verify multipart edge case #031
-- [ ] Verify multipart edge case #032
-- [ ] Verify multipart edge case #033
-- [ ] Verify multipart edge case #034
-- [ ] Verify multipart edge case #035
-- [ ] Verify multipart edge case #036
-- [ ] Verify multipart edge case #037
-- [ ] Verify multipart edge case #038
-- [ ] Verify multipart edge case #039
-- [ ] Verify multipart edge case #040
-- [ ] Verify multipart edge case #041
-- [ ] Verify multipart edge case #042
-- [ ] Verify multipart edge case #043
-- [ ] Verify multipart edge case #044
-- [ ] Verify multipart edge case #045
-- [ ] Verify multipart edge case #046
-- [ ] Verify multipart edge case #047
-- [ ] Verify multipart edge case #048
-- [ ] Verify multipart edge case #049
-- [ ] Verify multipart edge case #050
-- [ ] Verify multipart edge case #051
-- [ ] Verify multipart edge case #052
-- [ ] Verify multipart edge case #053
-- [ ] Verify multipart edge case #054
-- [ ] Verify multipart edge case #055
-- [ ] Verify multipart edge case #056
-- [ ] Verify multipart edge case #057
-- [ ] Verify multipart edge case #058
-- [ ] Verify multipart edge case #059
-- [ ] Verify multipart edge case #060
-- [ ] Verify multipart edge case #061
-- [ ] Verify multipart edge case #062
-- [ ] Verify multipart edge case #063
-- [ ] Verify multipart edge case #064
-- [ ] Verify multipart edge case #065
-- [ ] Verify multipart edge case #066
-- [ ] Verify multipart edge case #067
-- [ ] Verify multipart edge case #068
-- [ ] Verify multipart edge case #069
-- [ ] Verify multipart edge case #070
-- [ ] Verify multipart edge case #071
-- [ ] Verify multipart edge case #072
-- [ ] Verify multipart edge case #073
-- [ ] Verify multipart edge case #074
-- [ ] Verify multipart edge case #075
-- [ ] Verify multipart edge case #076
-- [ ] Verify multipart edge case #077
-- [ ] Verify multipart edge case #078
-- [ ] Verify multipart edge case #079
-- [ ] Verify multipart edge case #080
-- [ ] Verify multipart edge case #081
-- [ ] Verify multipart edge case #082
-- [ ] Verify multipart edge case #083
-- [ ] Verify multipart edge case #084
-- [ ] Verify multipart edge case #085
-- [ ] Verify multipart edge case #086
-- [ ] Verify multipart edge case #087
-- [ ] Verify multipart edge case #088
-- [ ] Verify multipart edge case #089
-- [ ] Verify multipart edge case #090
-
-### Error mapping deep-dive
-- [ ] Verify error code mapping #001
-- [ ] Verify error code mapping #002
-- [ ] Verify error code mapping #003
-- [ ] Verify error code mapping #004
-- [ ] Verify error code mapping #005
-- [ ] Verify error code mapping #006
-- [ ] Verify error code mapping #007
-- [ ] Verify error code mapping #008
-- [ ] Verify error code mapping #009
-- [ ] Verify error code mapping #010
-- [ ] Verify error code mapping #011
-- [ ] Verify error code mapping #012
-- [ ] Verify error code mapping #013
-- [ ] Verify error code mapping #014
-- [ ] Verify error code mapping #015
-- [ ] Verify error code mapping #016
-- [ ] Verify error code mapping #017
-- [ ] Verify error code mapping #018
-- [ ] Verify error code mapping #019
-- [ ] Verify error code mapping #020
-- [ ] Verify error code mapping #021
-- [ ] Verify error code mapping #022
-- [ ] Verify error code mapping #023
-- [ ] Verify error code mapping #024
-- [ ] Verify error code mapping #025
-- [ ] Verify error code mapping #026
-- [ ] Verify error code mapping #027
-- [ ] Verify error code mapping #028
-- [ ] Verify error code mapping #029
-- [ ] Verify error code mapping #030
-- [ ] Verify error code mapping #031
-- [ ] Verify error code mapping #032
-- [ ] Verify error code mapping #033
-- [ ] Verify error code mapping #034
-- [ ] Verify error code mapping #035
-- [ ] Verify error code mapping #036
-- [ ] Verify error code mapping #037
-- [ ] Verify error code mapping #038
-- [ ] Verify error code mapping #039
-- [ ] Verify error code mapping #040
-- [ ] Verify error code mapping #041
-- [ ] Verify error code mapping #042
-- [ ] Verify error code mapping #043
-- [ ] Verify error code mapping #044
-- [ ] Verify error code mapping #045
-- [ ] Verify error code mapping #046
-- [ ] Verify error code mapping #047
-- [ ] Verify error code mapping #048
-- [ ] Verify error code mapping #049
-- [ ] Verify error code mapping #050
-- [ ] Verify error code mapping #051
-- [ ] Verify error code mapping #052
-- [ ] Verify error code mapping #053
-- [ ] Verify error code mapping #054
-- [ ] Verify error code mapping #055
-- [ ] Verify error code mapping #056
-- [ ] Verify error code mapping #057
-- [ ] Verify error code mapping #058
-- [ ] Verify error code mapping #059
-- [ ] Verify error code mapping #060
-- [ ] Verify error code mapping #061
-- [ ] Verify error code mapping #062
-- [ ] Verify error code mapping #063
-- [ ] Verify error code mapping #064
-- [ ] Verify error code mapping #065
-- [ ] Verify error code mapping #066
-- [ ] Verify error code mapping #067
+Future compatibility gaps should be filed as concrete, named tasks (which
+request, expected XML/headers/status code) — not numbered placeholders. The
+"Bucket/Object/Multipart API test matrix" sections above enumerate the specific
+behaviors currently verified.
 
 ### Session 5 (2026-05-14)
 - [x] Phase 0: splitrs `src/storage/core/types.rs` (blocker; 1998→directory module)

@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! WS-8 extended multipart tests:
 //! - Error response shapes match AWS
 //! - Concurrent clients

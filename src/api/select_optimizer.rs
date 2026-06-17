@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! S3 Select query optimization layer
 //!
 //! Provides advanced optimizations for S3 Select queries:

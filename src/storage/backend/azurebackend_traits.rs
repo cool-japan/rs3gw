@@ -13,6 +13,8 @@
 //! - Blob Metadata → Object Metadata
 //! - Block Blobs → Multipart Uploads (emulated via committed block lists)
 
+#![cfg(feature = "azure")]
+
 use crate::storage::{
     BucketMetadata, ByteRange, MultipartUpload, ObjectMetadata, PartMetadata, StorageError,
     StorageStats,

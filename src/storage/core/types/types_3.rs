@@ -407,9 +407,11 @@ impl StorageEngine {
         let path = self.object_path(bucket, key);
         let compression_algo = metadata.metadata.get("__compression__").cloned();
         // D2: SSE objects store ciphertext on disk; the stored sha256 covers the plaintext.
-        // Skipping disk-level checksum validation for SSE objects here — the decrypt step in
-        // the API layer provides data integrity via AEAD authentication tags.
-        // TODO(session-6): decrypt-then-hash for full D2 compliance.
+        // The storage layer cannot validate it here (it has no decryptor). Two layers cover
+        // integrity for SSE objects instead: AEAD authentication tags fail decryption on any
+        // ciphertext tamper, and the API layer (`select_parser::get_object`) performs
+        // decrypt-then-hash against `__checksum_value__` after a full-object decrypt for full
+        // D2 compliance. Disk-level validation is therefore intentionally skipped here.
         let is_sse = metadata.metadata.contains_key("__sse_algorithm__");
         if self.checksum_validation && !is_sse {
             if let (Some(algo), Some(stored_value)) = (
@@ -469,6 +471,43 @@ impl StorageEngine {
         let stream = tokio_util::io::ReaderStream::new(file.take(length));
         let stream = stream.map(|result| result.map_err(StorageError::from));
         Ok((metadata, Box::new(stream)))
+    }
+    /// Read raw on-disk bytes `[file_start, file_end)` (exclusive end) for an object,
+    /// with **no** decompression, decryption, or checksum validation.
+    ///
+    /// This backs the SSE chunked range-GET path: the API layer computes the ciphertext
+    /// byte span covering the requested plaintext chunks and reads only those bytes,
+    /// instead of loading the whole encrypted object into memory.
+    ///
+    /// `file_end` is clamped to the actual on-disk file length (which, for an SSE object,
+    /// is the ciphertext length — never trust `metadata.size`, which is plaintext for
+    /// multipart objects). Returns `StorageError::InvalidRange` when `file_start` is at or
+    /// past end of file, or when `file_start >= file_end` after clamping.
+    pub async fn read_object_ciphertext_range(
+        &self,
+        bucket: &str,
+        key: &str,
+        file_start: u64,
+        file_end: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        if !self.bucket_exists(bucket).await? {
+            return Err(StorageError::BucketNotFound);
+        }
+        let path = self.object_path(bucket, key);
+        let mut file = File::open(&path).await?;
+        let file_len = file.metadata().await?.len();
+        if file_start >= file_len {
+            return Err(StorageError::InvalidRange);
+        }
+        let clamped_end = file_end.min(file_len);
+        if file_start >= clamped_end {
+            return Err(StorageError::InvalidRange);
+        }
+        let length = clamped_end - file_start;
+        file.seek(SeekFrom::Start(file_start)).await?;
+        let mut buf = Vec::with_capacity(length as usize);
+        file.take(length).read_to_end(&mut buf).await?;
+        Ok(buf)
     }
     /// Put an object
     ///

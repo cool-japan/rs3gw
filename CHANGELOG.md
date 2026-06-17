@@ -5,6 +5,32 @@ All notable changes to rs3gw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-06-17
+
+### Added
+- New `server` Cargo feature (default-on) gating the HTTP/gRPC server stack (axum, axum-server, tonic, async-graphql, utoipa, metrics-exporter-prometheus, opentelemetry/OTLP, reqwest webhooks). Library consumers can now use `default-features = false, features = ["local"]` to depend on only the storage layer.
+- New `local` Cargo feature for the storage-only profile.
+- Feature-gated cloud backends: `s3` (aws-sdk-s3 + aws-config), `gcs` (google-cloud-*), `azure` (azure_*), and `formats` (parquet/arrow/apache-avro/orc-rust/prost-reflect/rmp-serde). All off by default. New `all-backends` meta-feature activates all four.
+- `UsageTracker` (`src/observability/usage.rs`) — in-memory per-bucket accumulator tracking PUT/GET/DELETE request counts, bytes uploaded/downloaded, and live storage size/object count; drives the new `/api/usage` and `/api/usage/{bucket}` REST endpoints.
+- `/api/usage` endpoint — returns a JSON report with per-bucket `storage_bytes`, `object_count`, `bytes_uploaded`, `bytes_downloaded`, `requests_by_op`, `total_requests`, `estimated_cost.total_usd`, plus report-level `total_objects`, `total_storage_bytes`, and `generated_at`. Accepts `?flush=true` to invoke registered cost-hook callbacks.
+- `usage_tests.rs` — 2 integration tests exercising the full `/api/usage` report and `?flush=true` hook path against real S3 operations.
+- `xml_parser_fuzz.rs` — deterministic fuzz harness (3 tests) for the hand-rolled XML request parsers; uses a seeded xorshift64\* PRNG so any failure reproduces identically across runs.
+- Soak and observability integration test suites (`soak_tests.rs`, `observability_tests.rs`) for latency exemplars per v0.3/v0.5 roadmap.
+- `protox = "0.9"` build dependency — pure-Rust `.proto` compiler; `build.rs` now calls `protox::compile` to produce a `FileDescriptorSet` consumed by `tonic-prost-build`, eliminating the need for a system `protoc` installation.
+
+### Changed
+- `scirs2-core` and `scirs2-io` updated from 0.4.4 to 0.5.0.
+- `oxiarc-zstd`, `oxiarc-lz4`, `oxiarc-deflate` updated from 0.2.8 to 0.3.3.
+- `opentelemetry-otlp` now uses `default-features = false` (grpc-tonic transport only) to drop the reqwest/native-tls HTTP path.
+- `tonic` dependency now includes `features = ["tls-ring"]` for TLS support.
+- All server-only integration test files now carry `#![cfg(feature = "server")]`; format-dependent modules carry `#[cfg(feature = "formats")]` guards — compilation is skipped cleanly when the relevant feature is off.
+- `select_object_content` handler and XML select parser gated behind `#[cfg(feature = "formats")]`.
+- Binary `testdata-generator` now declares `required-features = ["formats"]`; `s3-migrate` requires `["s3", "server"]`; `rs3ctl` requires `["server"]`.
+- Pure-Rust default closure: with `default-features = false, features = ["local"]`, the dependency tree no longer pulls `ring`, `aws-lc-sys`, `native-tls`, `zstd-sys`, or `rustls 0.23` (C/FFI eliminated for the storage-only profile, per COOLJAPAN Pure Rust Policy).
+
+### Fixed
+- `HEAD` for SSE-encrypted objects now returns the plaintext `Content-Length` instead of the on-disk ciphertext length, making it consistent with `GET`; the sidecar is loaded to derive the plaintext size from either the sum of per-chunk `plaintext_len` fields (chunked/multipart) or `single_shot_plaintext_len(ciphertext_len)` (single-PUT), with a best-effort fallback to the on-disk size if the sidecar is unavailable.
+
 ## [0.2.1] - 2026-05-16
 
 ### Added
@@ -255,6 +281,7 @@ N/A (initial release)
 - Review ABAC policies for fine-grained access control
 - Enable audit logging for compliance requirements
 
+[0.2.2]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.2
 [0.2.1]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cool-japan/rs3gw/releases/tag/v0.2.0
 [0.1.0]: https://github.com/cool-japan/rs3gw/releases/tag/v0.1.0

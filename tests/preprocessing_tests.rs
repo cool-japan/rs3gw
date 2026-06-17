@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 // Integration tests for preprocessing API endpoints
 
 use reqwest::Client;

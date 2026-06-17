@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Cache integration tests for rs3gw
 
 mod common;

@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! # FieldValue - Trait Implementations
 //!
 //! This module contains trait implementations for `FieldValue`.

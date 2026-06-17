@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Bucket operation tests for rs3gw
 //!
 //! Comprehensive test matrix covering all bucket API operations:
@@ -77,6 +78,7 @@ async fn setup_auth_enforced_server(access_key: &str, secret_key: &str) -> AuthS
     ));
     let metrics_tracker = Arc::new(rs3gw::observability::MetricsTracker::new());
     let select_result_cache = Arc::new(rs3gw::api::SelectResultCache::new(100, 10 * 1024 * 1024));
+    #[cfg(feature = "formats")]
     let query_intelligence = Arc::new(rs3gw::api::QueryIntelligence::new());
     let training_path = storage_root.join("training");
     let training_manager = Arc::new(rs3gw::storage::TrainingManager::new(training_path));
@@ -99,13 +101,16 @@ async fn setup_auth_enforced_server(access_key: &str, secret_key: &str) -> AuthS
         throttle: None,
         quota: None,
         event_broadcaster: rs3gw::api::EventBroadcaster::new(),
+        #[cfg(feature = "formats")]
         query_plan_cache: None,
         select_result_cache,
+        #[cfg(feature = "formats")]
         query_intelligence,
         advanced_replication: None,
         preprocessing_manager,
         predictive_analytics,
         metrics_tracker,
+        usage_tracker: std::sync::Arc::new(rs3gw::observability::UsageTracker::new()),
         training_manager,
         start_time: std::time::Instant::now(),
         verifier,

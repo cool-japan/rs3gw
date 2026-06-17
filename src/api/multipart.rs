@@ -462,7 +462,10 @@ pub async fn complete_multipart_upload(
     {
         Ok(etag) => {
             // SSE-S3 post-encryption: if the multipart was initiated with AES256,
-            // the assembled object is currently plaintext. Encrypt it now.
+            // the assembled object is currently plaintext. Encrypt it now using the
+            // chunked (v2) format so the resulting object supports seekable range-GET
+            // (a range read fetches only the covering ciphertext chunks from disk,
+            // never the whole object).
             //
             // We read the __sse_algorithm__ flag from the object metadata that
             // complete_multipart_upload preserved from the MultipartMetadata.
@@ -483,7 +486,7 @@ pub async fn complete_multipart_upload(
                         let aad = format!("{}/{}", bucket, key);
                         match state
                             .encryption
-                            .encrypt(&plaintext_bytes, Some(aad.as_bytes()))
+                            .encrypt_chunked(&plaintext_bytes, Some(aad.as_bytes()))
                             .await
                         {
                             Ok(enc) => {

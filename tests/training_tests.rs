@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 // Integration tests for distributed training API endpoints
 
 use base64::Engine;

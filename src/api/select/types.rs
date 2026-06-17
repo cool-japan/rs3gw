@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! S3 Select types and executor
 //!
 //! Contains all type definitions and the SelectExecutor implementation.

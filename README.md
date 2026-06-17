@@ -33,6 +33,7 @@ rs3gw (Rust S3 Gateway) is an ultra-high-performance, enterprise-grade object st
 ### Observability & Performance
 - **Distributed Tracing**: OpenTelemetry integration with Jaeger/Tempo
 - **Prometheus Metrics**: 50+ metrics for monitoring and alerting
+- **Cost & Usage Tracking**: Per-bucket request counts, transfer bytes, and estimated cost breakdown via `/api/usage` REST endpoint
 - **Anomaly Detection**: Statistical analysis for performance anomalies
 - **Auto-Scaling**: Dynamic resource adaptation based on load
 - **Continuous Profiling**: CPU, memory, and I/O profiling with flamegraphs
@@ -92,6 +93,18 @@ rs3gw (Rust S3 Gateway) is an ultra-high-performance, enterprise-grade object st
 - Rust 1.85 or later
 - Linux, macOS, or Windows (WSL2)
 - (Optional) Docker and Docker Compose
+
+### Using rs3gw as a Library
+
+Add to your `Cargo.toml`:
+
+```toml
+# Full server + all features:
+rs3gw = "0.2.2"
+
+# Storage-only (no server, minimal deps, Pure Rust):
+rs3gw = { version = "0.2.2", default-features = false, features = ["local"] }
+```
 
 ### Quick Start (Local Development)
 
@@ -946,11 +959,11 @@ We welcome contributions! Please see our development process:
 
 ## Project Summary
 
-- **Version**: 0.2.1 (2026-05-16)
+- **Version**: 0.2.2 (2026-06-17)
 - **Language**: Rust (100% Pure Rust default features)
-- **Lines of Code**: ~82,146 Rust SLoC (96,865 total Rust lines across 214 files)
-- **Modules**: 214 Rust files across 318 total files
-- **Tests**: 961 tests (952 lib + integration, 9 doc tests), 0 failures
+- **Lines of Code**: ~85,276 Rust SLoC (100,450 total Rust lines across 220 files)
+- **Modules**: 220 Rust files across 324 total files
+- **Tests**: 996 tests (987 lib + integration, 9 doc tests), 0 failures
 - **Quality**: 0 clippy warnings, 0 rustdoc errors
 - **Dependencies**: Carefully selected for performance and security (all up-to-date)
 - **Policy Compliance**: 100% SCIRS2 compliant
@@ -970,14 +983,14 @@ Licensed under the [Apache License, Version 2.0](LICENSE).
 
 ## Known Limitations
 
-The following are known gaps in the current release (0.2.1). They are documented here to set accurate expectations for production deployments.
+The following are known gaps in the current release (0.2.2). They are documented here to set accurate expectations for production deployments.
 
 - **SigV4 chunked streaming HMAC**: Per-chunk HMAC verification for `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and `UNSIGNED-PAYLOAD` is not implemented. The request body is accepted when these payload types are declared; only the canonical request signature is verified. Full per-chunk HMAC is planned for a future release.
 - **Object Lock / WORM**: Object Lock API endpoints (`GetObjectRetention`, `PutObjectRetention`, `GetObjectLegalHold`, `PutObjectLegalHold`) are registered but return "Object Lock must be enabled" errors. Retention and legal-hold constraints are not enforced.
 - **S3 Lifecycle rule execution**: `PutBucketLifecycleConfiguration` and `GetBucketLifecycleConfiguration` accept and return lifecycle rules, but the rules are not executed. Expiration, transition, and abort-multipart-upload actions are not triggered automatically.
 - **Bucket configuration stubs**: Many bucket configuration APIs (encryption, CORS, notification, logging, request payment, website, accelerate, ownership controls, public access block, intelligent tiering, metrics, analytics, inventory) accept PUT requests without error but do not persist or enforce the configuration. GET requests return default/empty responses.
 - **Cross-region replication execution**: `PutBucketReplication` stores replication configuration and `GetBucketReplication` returns it, but object transfers to remote destinations are not implemented in this release.
-- **Filesystem-only storage backend**: The storage engine writes objects to the local filesystem. Cloud-backed storage (AWS S3, GCS, Azure Blob, MinIO) is listed in the architecture diagram as a future target but is not available in this release.
+- **Cloud backends optional (not default)**: Cloud-backed storage (AWS S3 via `s3` feature, GCS via `gcs`, Azure Blob via `azure`) is available as opt-in Cargo features. They are off by default; the default build uses only the local filesystem backend. Use `default-features = false, features = ["local"]` for a storage-only profile with no C/FFI dependencies.
 - **gRPC TLS requires manual cert provisioning**: Enabling TLS for the gRPC server requires manually providing a certificate and key via `RS3GW_GRPC_TLS_CERT` / `RS3GW_GRPC_TLS_KEY`. Automatic TLS (e.g. ACME/Let's Encrypt) is not supported.
 - **Cluster / gossip synchronization not implemented**: `RS3GW_CLUSTER_ENABLED=true` parses cluster configuration and initialises the replication manager, but inter-node gossip and data synchronization are not yet implemented. All nodes operate independently.
 - **Lambda Object Lambda**: `WriteGetObjectResponse` returns NotImplemented. Lambda integration is not supported.
@@ -994,19 +1007,19 @@ The following are known gaps in the current release (0.2.1). They are documented
 
 ## Project Statistics
 
-Measured with `tokei` on 2026-03-16 (branch `0.2.0`):
+Measured with `tokei` on 2026-06-17 (branch `0.2.2`):
 
 | Language     | Files | Code Lines | Comment Lines | Blank Lines |
 |--------------|------:|----------:|-------------:|------------:|
-| Rust         |   193 |    69,137  |        3,350 |      10,020 |
+| Rust         |   220 |    85,276  |        4,091 |      11,083 |
 | Protobuf     |     4 |       459  |           40 |         103 |
-| Python       |     6 |     1,422  |          112 |         284 |
+| Python       |    10 |       876  |          129 |         121 |
 | Shell        |     4 |       310  |           59 |          79 |
 | TOML         |    11 |       784  |          170 |         207 |
-| YAML         |    27 |       907  |          101 |          55 |
-| **Total**    | **300** | **74,667** |      **10,818** |     **13,355** |
+| Markdown     |    30 |     9,248  |            0 |       6,861 |
+| **Total**    | **324** | **116,774** |      **11,612** |     **14,322** |
 
-**Estimated development cost**: $2,502,803 (COCOMO model, 74,667 SLoC)
+**Estimated development cost**: ~$2,985,000 (COCOMO model, 85,276 SLoC)
 
 The project is 100% Pure Rust for production code (no C/Fortran/unsafe FFI in default features).
 

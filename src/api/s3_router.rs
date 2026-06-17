@@ -18,11 +18,13 @@ use utoipa::OpenApi;
 
 use crate::AppState;
 
+#[cfg(feature = "formats")]
+use super::query_intelligence_handlers;
 use super::utils::{error_response, malformed_xml_response};
 use super::{
     bucket_stubs, cors, graphql, handlers, multipart, observability_handlers, openapi,
-    preprocessing_handlers, query_intelligence_handlers, replication_handlers,
-    select_cache_handlers, tiering_handlers, training_handlers, websocket,
+    preprocessing_handlers, replication_handlers, select_cache_handlers, tiering_handlers,
+    training_handlers, websocket,
 };
 
 /// Query parameters for object operations (multipart, tagging, acl, attributes, restore, etc.)
@@ -680,17 +682,29 @@ async fn post_object_dispatcher(
 
     // Check for SelectObjectContent (has ?select&select-type=2)
     if query.select.is_some() || query.select_type.is_some() {
-        // Collect the request body
-        let body_bytes = match body.collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(e) => {
-                tracing::error!("Failed to collect request body: {}", e);
-                return (StatusCode::BAD_REQUEST, "Failed to read request body").into_response();
-            }
-        };
-        return handlers::select_object_content(State(state), Path((bucket, key)), body_bytes)
-            .await
-            .into_response();
+        #[cfg(feature = "formats")]
+        {
+            // Collect the request body
+            let body_bytes = match body.collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(e) => {
+                    tracing::error!("Failed to collect request body: {}", e);
+                    return (StatusCode::BAD_REQUEST, "Failed to read request body")
+                        .into_response();
+                }
+            };
+            return handlers::select_object_content(State(state), Path((bucket, key)), body_bytes)
+                .await
+                .into_response();
+        }
+        #[cfg(not(feature = "formats"))]
+        {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                "S3 Select requires the 'formats' feature to be enabled",
+            )
+                .into_response();
+        }
     }
 
     // Check for CreateMultipartUpload (has ?uploads)
@@ -1602,6 +1616,49 @@ query GetStats {
 }
 
 /// Creates the S3-compatible API router
+/// Query Intelligence API routes (AI-powered query optimization).
+///
+/// These endpoints depend on SQL parsing from the S3 Select implementation,
+/// which is only available when the `formats` feature is enabled.
+#[cfg(feature = "formats")]
+fn query_intelligence_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/query/intelligence/statistics",
+            get(query_intelligence_handlers::get_statistics),
+        )
+        .route(
+            "/api/query/intelligence/summary",
+            get(query_intelligence_handlers::get_summary),
+        )
+        .route(
+            "/api/query/intelligence/predict-cost",
+            post(query_intelligence_handlers::predict_cost),
+        )
+        .route(
+            "/api/query/intelligence/recommend-strategy",
+            post(query_intelligence_handlers::recommend_strategy),
+        )
+        .route(
+            "/api/query/intelligence/find-similar",
+            post(query_intelligence_handlers::find_similar),
+        )
+        .route(
+            "/api/query/intelligence/index-recommendations",
+            get(query_intelligence_handlers::get_index_recommendations),
+        )
+        .route(
+            "/api/query/intelligence/complexity-distribution",
+            get(query_intelligence_handlers::get_complexity_distribution),
+        )
+}
+
+/// Query Intelligence routes are unavailable without the `formats` feature.
+#[cfg(not(feature = "formats"))]
+fn query_intelligence_routes() -> Router<AppState> {
+    Router::new()
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         // Health check endpoint
@@ -1638,6 +1695,11 @@ pub fn routes() -> Router<AppState> {
         .route("/api/observability/predictions/access-patterns", get(observability_handlers::get_access_pattern_prediction))
         .route("/api/observability/predictions/costs", get(observability_handlers::get_cost_forecast))
         .route("/api/observability/predictions/capacity", get(observability_handlers::get_capacity_recommendations))
+        // Cost/usage reporting endpoints (per-bucket accounting + estimated cost)
+        .route("/api/usage", get(observability_handlers::get_usage))
+        .route("/api/usage/{bucket}", get(observability_handlers::get_bucket_usage))
+        // Latency exemplars (latency samples correlated with OpenTelemetry trace IDs)
+        .route("/metrics/exemplars", get(observability_handlers::get_metrics_exemplars))
         // Preprocessing API endpoints (v5.0.0 - custom, non-S3 API)
         .route("/api/preprocessing/pipelines", post(preprocessing_handlers::create_pipeline))
         .route("/api/preprocessing/pipelines", get(preprocessing_handlers::list_pipelines))
@@ -1670,13 +1732,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/select/cache/save", post(select_cache_handlers::save_cache))
         .route("/api/select/cache/load", post(select_cache_handlers::load_cache))
         // Query Intelligence API endpoints (AI-powered query optimization)
-        .route("/api/query/intelligence/statistics", get(query_intelligence_handlers::get_statistics))
-        .route("/api/query/intelligence/summary", get(query_intelligence_handlers::get_summary))
-        .route("/api/query/intelligence/predict-cost", post(query_intelligence_handlers::predict_cost))
-        .route("/api/query/intelligence/recommend-strategy", post(query_intelligence_handlers::recommend_strategy))
-        .route("/api/query/intelligence/find-similar", post(query_intelligence_handlers::find_similar))
-        .route("/api/query/intelligence/index-recommendations", get(query_intelligence_handlers::get_index_recommendations))
-        .route("/api/query/intelligence/complexity-distribution", get(query_intelligence_handlers::get_complexity_distribution))
+        .merge(query_intelligence_routes())
         // Distributed Training API endpoints (v5.0.0 - ML/AI training management)
         .route("/api/training/experiments", post(training_handlers::create_experiment))
         .route("/api/training/experiments/{experiment_id}", get(training_handlers::get_experiment))

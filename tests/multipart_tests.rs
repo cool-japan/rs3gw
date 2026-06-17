@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Multipart upload tests for rs3gw
 
 mod common;

@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Tests for S3 CORS preflight (OPTIONS) and simple-request header injection.
 //!
 //! Preflight tests use `setup_test_server()` (OPTIONS handler is part of

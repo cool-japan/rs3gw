@@ -1,8 +1,6 @@
 # Enhanced Docker Compose stack for rs3gw development
 # Includes rs3gw, Prometheus, Grafana, Jaeger, and MinIO for testing
 
-version: '3.9'
-
 services:
   # rs3gw - Main S3 Gateway
   rs3gw:

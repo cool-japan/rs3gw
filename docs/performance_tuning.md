@@ -169,6 +169,35 @@ export RS3GW_COMPRESSION="none"
 | Cold Storage | `zstd:9` | Maximize space savings |
 | Hot Data | `lz4` | Minimize latency |
 
+### Object-Size Considerations (Threshold)
+
+Compression is **off by default** (`RS3GW_COMPRESSION=none`). When enabled it is
+applied to every stored object — there is no built-in minimum-size gate — so the
+trade-off below matters most for workloads dominated by tiny objects.
+
+The `bench_compression_threshold` group in `benches/compression_benchmarks.rs`
+sweeps object sizes from 512 B to 8 KiB, comparing `none` vs `zstd:1` vs `lz4`;
+`bench_compression_ratio` sweeps payload entropy. Reproduce with:
+
+```bash
+cargo bench --bench compression_benchmarks
+```
+
+Guidance derived from the sweep:
+
+- **Very small objects (≲ 1 KiB):** compression rarely pays off — framing/CPU
+  overhead dominates and the ratio gain is marginal. Prefer `none`, or `lz4` if
+  the payloads are highly compressible (e.g. small JSON).
+- **Small–medium objects (1 KiB–1 MiB):** `zstd:1`–`zstd:3` is the sweet spot for
+  mixed text/JSON/XML; `lz4` when latency is the priority.
+- **Large objects (≳ 1 MiB):** `zstd:3` (default) balances ratio and throughput;
+  `zstd:9` for cold storage where space dominates CPU.
+- **Already-compressed payloads** (images, video, archives): always `none`.
+
+If a per-object size threshold is needed, gate it at the application/bucket
+policy layer; the storage engine intentionally keeps the compression decision a
+single global mode for predictability.
+
 ---
 
 ## Caching Configuration

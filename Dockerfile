@@ -3,12 +3,14 @@
 # Supports linux/amd64 and linux/arm64 architectures
 
 # Build stage
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.89-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -22,6 +24,10 @@ RUN rm -rf src
 # Build the actual application
 COPY src ./src
 COPY tests ./tests
+COPY examples ./examples
+COPY benches ./benches
+COPY build.rs ./build.rs
+COPY proto ./proto
 RUN touch src/main.rs && cargo build --release
 
 # Runtime stage - minimal image

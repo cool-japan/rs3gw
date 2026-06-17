@@ -21,9 +21,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+#[cfg(feature = "formats")]
 use futures::TryStreamExt;
 use tracing::{error, info};
 
+#[cfg(feature = "formats")]
 use super::select_parser::parse_select_request_xml;
 
 /// Convert ObjectMetadata to ObjectContents for list responses
@@ -631,6 +633,7 @@ pub async fn put_bucket_versioning(
 ///
 /// Runs SQL queries against CSV, JSON, or Parquet objects.
 /// Results are cached using SelectResultCache for improved performance on repeated queries.
+#[cfg(feature = "formats")]
 pub async fn select_object_content(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,

@@ -2,14 +2,17 @@
 //!
 //! A lightweight, zero-GC S3-compatible gateway powered by scirs2-io.
 
+#[cfg(feature = "server")]
 pub mod api;
 pub mod auth;
 pub mod cluster;
+#[cfg(feature = "server")]
 pub mod grpc;
 pub mod metrics;
 pub mod observability;
 pub mod storage;
 
+#[cfg(feature = "server")]
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,14 +20,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "server")]
 use crate::api::{EventBroadcaster, ThrottleConfig, ThrottleManager};
-use crate::cluster::{
-    AdvancedReplicationManager, ClusterConfig, ReplicationConfig, ReplicationMode,
-};
+#[cfg(feature = "server")]
+use crate::cluster::AdvancedReplicationManager;
+use crate::cluster::{ClusterConfig, ReplicationConfig, ReplicationMode};
 use crate::storage::{
-    CacheConfig, CacheManager, ChunkingAlgorithm, CompressionMode, DedupConfig, QuotaConfig,
-    QuotaManager, StorageEngine, ZeroCopyConfig,
+    CacheConfig, ChunkingAlgorithm, CompressionMode, DedupConfig, QuotaConfig, ZeroCopyConfig,
 };
+#[cfg(feature = "server")]
+use crate::storage::{CacheManager, QuotaManager, StorageEngine};
+#[cfg(feature = "server")]
 use metrics_exporter_prometheus::PrometheusHandle;
 
 /// TLS configuration
@@ -91,6 +97,7 @@ impl ConnectionPoolConfig {
     }
 
     /// Build a configured reqwest client
+    #[cfg(feature = "server")]
     pub fn build_client(&self) -> reqwest::Client {
         reqwest::Client::builder()
             .pool_max_idle_per_host(self.pool_max_idle_per_host)
@@ -633,6 +640,7 @@ impl CacheSettings {
 }
 
 /// Throttle configuration wrapper
+#[cfg(feature = "server")]
 #[derive(Debug, Clone, Default)]
 pub struct ThrottleSettings {
     /// Enable throttling (default: false)
@@ -645,6 +653,7 @@ pub struct ThrottleSettings {
     pub download_mbps: u64,
 }
 
+#[cfg(feature = "server")]
 impl ThrottleSettings {
     /// Load from environment variables
     pub fn from_env() -> Self {
@@ -788,6 +797,7 @@ impl Drop for InFlightGuard {
 }
 
 /// Application state shared across handlers
+#[cfg(feature = "server")]
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
@@ -797,13 +807,17 @@ pub struct AppState {
     pub throttle: Option<Arc<ThrottleManager>>,
     pub quota: Option<Arc<QuotaManager>>,
     pub event_broadcaster: EventBroadcaster,
+    #[cfg(feature = "formats")]
     pub query_plan_cache: Option<Arc<api::select_optimizer::QueryPlanCache>>,
     pub select_result_cache: Arc<api::SelectResultCache>,
+    #[cfg(feature = "formats")]
     pub query_intelligence: Arc<api::QueryIntelligence>,
     pub advanced_replication: Option<Arc<AdvancedReplicationManager>>,
     pub preprocessing_manager: Arc<storage::preprocessing::PreprocessingManager>,
     pub predictive_analytics: Arc<observability::PredictiveAnalytics>,
     pub metrics_tracker: Arc<observability::MetricsTracker>,
+    /// Per-bucket cost/usage accounting with pluggable export hooks.
+    pub usage_tracker: Arc<observability::UsageTracker>,
     pub training_manager: Arc<storage::TrainingManager>,
     pub start_time: std::time::Instant,
     /// Optional SigV4 verifier — None means auth is disabled (passthrough mode)
@@ -817,6 +831,7 @@ pub struct AppState {
     pub encryption: Arc<crate::storage::encryption::EncryptionService>,
 }
 
+#[cfg(feature = "server")]
 impl AppState {
     /// Create a new AppState with all managers initialized
     pub fn new(
@@ -871,6 +886,12 @@ impl AppState {
         // Initialize real-time metrics tracker for predictive analytics
         let metrics_tracker = Arc::new(observability::MetricsTracker::new());
 
+        // Initialize per-bucket cost/usage tracker with the built-in logging export hook.
+        let usage_tracker = Arc::new(observability::UsageTracker::with_hooks(
+            observability::PricingConfig::default(),
+            vec![Arc::new(observability::LoggingUsageHook)],
+        ));
+
         // Initialize S3 Select result cache from configuration
         let select_result_cache = Arc::new(api::SelectResultCache::new(
             config.select_cache.max_entries,
@@ -878,6 +899,7 @@ impl AppState {
         ));
 
         // Initialize query intelligence for AI-powered query optimization
+        #[cfg(feature = "formats")]
         let query_intelligence = Arc::new(api::QueryIntelligence::new());
 
         // Initialize SigV4 verifier if credentials are configured
@@ -919,13 +941,16 @@ impl AppState {
             throttle,
             quota,
             event_broadcaster: EventBroadcaster::new(),
+            #[cfg(feature = "formats")]
             query_plan_cache: Some(Arc::new(api::select_optimizer::QueryPlanCache::new(1000))),
             select_result_cache,
+            #[cfg(feature = "formats")]
             query_intelligence,
             advanced_replication,
             preprocessing_manager,
             predictive_analytics,
             metrics_tracker,
+            usage_tracker,
             training_manager,
             start_time: std::time::Instant::now(),
             verifier,
@@ -1005,7 +1030,7 @@ impl AppState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 pub mod test_helpers {
     use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
     use std::sync::OnceLock;

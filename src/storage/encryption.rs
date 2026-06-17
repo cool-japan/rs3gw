@@ -131,6 +131,81 @@ pub struct EncryptedData {
     pub chunk_size: u64,
 }
 
+/// The ciphertext-file byte span covering a requested plaintext range for a v2
+/// (chunked) SSE object.
+///
+/// Produced by [`chunk_ciphertext_span`]; lets the API layer read **only** the
+/// ciphertext bytes for the covering chunks from disk (seekable range-GET)
+/// instead of loading the whole object into memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkSpan {
+    /// Index of the first chunk that covers the plaintext range.
+    pub first_chunk: usize,
+    /// Index of the last chunk (inclusive) that covers the plaintext range.
+    pub last_chunk: usize,
+    /// Byte offset in the ciphertext file where `first_chunk` begins.
+    pub file_start: u64,
+    /// Byte offset in the ciphertext file where `last_chunk` ends (exclusive).
+    pub file_end: u64,
+    /// Plaintext byte offset where `first_chunk` begins (`first_chunk * chunk_size`).
+    pub first_chunk_plain_start: u64,
+}
+
+/// Plaintext length of a v1 single-shot AES-256-GCM payload given its on-disk
+/// ciphertext length.
+///
+/// A single-shot payload is `plaintext || GCM_TAG` (16-byte tag), so the plaintext
+/// length is `ciphertext_len - 16`. Returns 0 when `ciphertext_len < 16` (e.g. a
+/// 0-length object, which is stored as 0 ciphertext bytes) — this is the empty-object
+/// guard that prevents an underflow in the GET path.
+pub fn single_shot_plaintext_len(ciphertext_len: u64) -> u64 {
+    ciphertext_len.saturating_sub(GCM_TAG_LEN as u64)
+}
+
+/// Compute the ciphertext-file byte span covering plaintext bytes
+/// `[range_start, range_end)` (exclusive end) for a chunked (v2) object.
+///
+/// On disk each chunk occupies `plaintext_len + GCM_TAG_LEN` bytes. `range_start`
+/// and `range_end` are plaintext coordinates; `chunk_size` is the fixed plaintext
+/// chunk size used at encrypt time.
+pub fn chunk_ciphertext_span(
+    sidecar_chunks: &[crate::storage::SidecarChunk],
+    chunk_size: u64,
+    range_start: u64,
+    range_end: u64,
+) -> Result<ChunkSpan, EncryptionError> {
+    if chunk_size == 0 || sidecar_chunks.is_empty() {
+        return Err(EncryptionError::DecryptionFailed);
+    }
+    if range_start >= range_end {
+        return Err(EncryptionError::DecryptionFailed);
+    }
+
+    let first_chunk = (range_start / chunk_size) as usize;
+    let last_chunk = ((range_end - 1) / chunk_size) as usize;
+    if last_chunk >= sidecar_chunks.len() {
+        return Err(EncryptionError::DecryptionFailed);
+    }
+
+    // Accumulate per-chunk on-disk sizes to locate the byte span of the covered chunks.
+    let mut file_start: u64 = 0;
+    for chunk in sidecar_chunks.iter().take(first_chunk) {
+        file_start += chunk.plaintext_len + GCM_TAG_LEN as u64;
+    }
+    let mut file_end = file_start;
+    for chunk in sidecar_chunks.iter().take(last_chunk + 1).skip(first_chunk) {
+        file_end += chunk.plaintext_len + GCM_TAG_LEN as u64;
+    }
+
+    Ok(ChunkSpan {
+        first_chunk,
+        last_chunk,
+        file_start,
+        file_end,
+        first_chunk_plain_start: first_chunk as u64 * chunk_size,
+    })
+}
+
 // ============================================================================
 // Key Provider Trait
 // ============================================================================
@@ -885,8 +960,12 @@ impl EncryptionService {
 
     /// Decrypt only the chunks covering `[range_start, range_end)` bytes (exclusive end).
     ///
-    /// `ciphertext_bytes` is the full concatenated chunk ciphertext from disk.
+    /// `ciphertext_bytes` is the **full** concatenated chunk ciphertext from disk.
     /// `aad_prefix` is the same prefix used during encryption (bucket/key path).
+    ///
+    /// Prefer [`Self::decrypt_chunked_range_from_slice`] when the caller can read only
+    /// the covering byte span from disk (true seekable range-GET). This method is kept
+    /// for callers that already hold the whole ciphertext buffer in memory.
     pub async fn decrypt_chunked_range(
         &self,
         sidecar_kek_id: &str,
@@ -899,53 +978,74 @@ impl EncryptionService {
         range_end: u64, // exclusive
         aad_prefix: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
-        if sidecar_chunk_size == 0 || sidecar_chunks.is_empty() {
-            return Err(EncryptionError::DecryptionFailed);
-        }
+        let span =
+            chunk_ciphertext_span(sidecar_chunks, sidecar_chunk_size, range_start, range_end)?;
+        let chunk_ct_slice = ciphertext_bytes
+            .get(span.file_start as usize..span.file_end as usize)
+            .ok_or(EncryptionError::DecryptionFailed)?;
+        self.decrypt_chunked_range_from_slice(
+            sidecar_kek_id,
+            sidecar_encrypted_dek,
+            sidecar_dek_nonce,
+            sidecar_chunks,
+            &span,
+            chunk_ct_slice,
+            range_start,
+            range_end,
+            aad_prefix,
+        )
+        .await
+    }
+
+    /// Decrypt a plaintext range from a ciphertext slice that begins **exactly** at
+    /// `span.file_start` (the first covered chunk's file offset, as computed by
+    /// [`chunk_ciphertext_span`]).
+    ///
+    /// This is the seekable path: the caller reads only `[span.file_start, span.file_end)`
+    /// from disk and passes it here, so a small range read never loads the whole object
+    /// into memory.
+    pub async fn decrypt_chunked_range_from_slice(
+        &self,
+        sidecar_kek_id: &str,
+        sidecar_encrypted_dek: &[u8],
+        sidecar_dek_nonce: &[u8],
+        sidecar_chunks: &[crate::storage::SidecarChunk],
+        span: &ChunkSpan,
+        chunk_ct_slice: &[u8],
+        range_start: u64,
+        range_end: u64, // exclusive
+        aad_prefix: &[u8],
+    ) -> Result<Vec<u8>, EncryptionError> {
         if range_start >= range_end {
             return Err(EncryptionError::DecryptionFailed);
         }
 
-        // Decrypt DEK.
+        // Decrypt DEK with KEK.
         let kek = self.key_provider.get_kek(sidecar_kek_id).await?;
         let dek = self.decrypt_aes256gcm(sidecar_encrypted_dek, &kek, sidecar_dek_nonce, None)?;
 
-        let first_chunk = (range_start / sidecar_chunk_size) as usize;
-        let last_chunk = ((range_end - 1) / sidecar_chunk_size) as usize;
-
-        // Compute byte offsets of each chunk in the ciphertext file.
-        // Each chunk occupies (plaintext_len + GCM_TAG_LEN) bytes on disk.
-        let mut file_offsets: Vec<usize> = Vec::with_capacity(sidecar_chunks.len() + 1);
-        let mut acc: usize = 0;
-        for chunk in sidecar_chunks.iter() {
-            file_offsets.push(acc);
-            acc += chunk.plaintext_len as usize + GCM_TAG_LEN;
-        }
-        file_offsets.push(acc); // sentinel end
-
-        // Decrypt only the required chunks.
+        // `chunk_ct_slice` is relative to `span.file_start`; walk chunks from
+        // `first_chunk`, tracking a local offset that starts at 0.
         let mut plaintext_parts: Vec<u8> = Vec::new();
-        for idx in first_chunk..=last_chunk {
+        let mut local_off: usize = 0;
+        for idx in span.first_chunk..=span.last_chunk {
             let chunk = sidecar_chunks
                 .get(idx)
                 .ok_or(EncryptionError::DecryptionFailed)?;
-            let file_start = *file_offsets
-                .get(idx)
-                .ok_or(EncryptionError::DecryptionFailed)?;
-            let file_end = file_start + chunk.plaintext_len as usize + GCM_TAG_LEN;
-            let chunk_ct = ciphertext_bytes
-                .get(file_start..file_end)
+            let ct_len = chunk.plaintext_len as usize + GCM_TAG_LEN;
+            let chunk_ct = chunk_ct_slice
+                .get(local_off..local_off + ct_len)
                 .ok_or(EncryptionError::DecryptionFailed)?;
             let chunk_aad = build_chunk_aad(aad_prefix, idx);
             let chunk_pt =
                 self.decrypt_aes256gcm(chunk_ct, &dek, &chunk.nonce, Some(&chunk_aad))?;
             plaintext_parts.extend_from_slice(&chunk_pt);
+            local_off += ct_len;
         }
 
         // Slice the concatenated plaintext to the exact requested byte range.
-        let first_chunk_start_byte = first_chunk as u64 * sidecar_chunk_size;
-        let local_start = (range_start - first_chunk_start_byte) as usize;
-        let local_end = (range_end - first_chunk_start_byte) as usize;
+        let local_start = (range_start - span.first_chunk_plain_start) as usize;
+        let local_end = (range_end - span.first_chunk_plain_start) as usize;
         let result = plaintext_parts
             .get(local_start..local_end)
             .ok_or(EncryptionError::DecryptionFailed)?
@@ -1187,5 +1287,143 @@ mod tests {
             .await
             .expect("Failed to encrypt");
         assert_ne!(encrypted1.ciphertext, encrypted3.ciphertext);
+    }
+
+    #[test]
+    fn test_single_shot_plaintext_len() {
+        // A single-shot payload is plaintext || 16-byte GCM tag.
+        assert_eq!(
+            single_shot_plaintext_len(0),
+            0,
+            "empty object → 0 (no underflow)"
+        );
+        assert_eq!(
+            single_shot_plaintext_len(16),
+            0,
+            "16-byte tag only → empty plaintext"
+        );
+        assert_eq!(single_shot_plaintext_len(100), 84);
+        assert_eq!(
+            single_shot_plaintext_len(5),
+            0,
+            "sub-tag length floors to 0"
+        );
+    }
+
+    #[test]
+    fn test_chunk_ciphertext_span_offsets() {
+        // Two chunks: 5 MiB then 1 MiB. On disk each chunk is plaintext_len + 16 (GCM tag).
+        let chunk_size = SSE_CHUNK_SIZE as u64; // 5 MiB
+        let chunks = vec![
+            crate::storage::SidecarChunk {
+                nonce: vec![0u8; 12],
+                plaintext_len: chunk_size,
+            },
+            crate::storage::SidecarChunk {
+                nonce: vec![1u8; 12],
+                plaintext_len: 1024 * 1024,
+            },
+        ];
+        let chunk0_disk = chunk_size + GCM_TAG_LEN as u64;
+
+        // Range inside chunk 0.
+        let span = chunk_ciphertext_span(&chunks, chunk_size, 100, 200).expect("span");
+        assert_eq!(span.first_chunk, 0);
+        assert_eq!(span.last_chunk, 0);
+        assert_eq!(span.file_start, 0);
+        assert_eq!(span.file_end, chunk0_disk);
+        assert_eq!(span.first_chunk_plain_start, 0);
+
+        // Range entirely inside chunk 1 — file_start must skip chunk 0 (non-zero).
+        let span = chunk_ciphertext_span(&chunks, chunk_size, chunk_size + 10, chunk_size + 20)
+            .expect("span");
+        assert_eq!(span.first_chunk, 1);
+        assert_eq!(span.last_chunk, 1);
+        assert_eq!(span.file_start, chunk0_disk);
+        assert_eq!(
+            span.file_end,
+            chunk0_disk + 1024 * 1024 + GCM_TAG_LEN as u64
+        );
+        assert_eq!(span.first_chunk_plain_start, chunk_size);
+
+        // Range spanning the chunk boundary covers both chunks.
+        let span = chunk_ciphertext_span(&chunks, chunk_size, chunk_size - 5, chunk_size + 5)
+            .expect("span");
+        assert_eq!(span.first_chunk, 0);
+        assert_eq!(span.last_chunk, 1);
+        assert_eq!(span.file_start, 0);
+
+        // Invalid: empty range / no chunks / zero chunk size.
+        assert!(chunk_ciphertext_span(&chunks, chunk_size, 100, 100).is_err());
+        assert!(chunk_ciphertext_span(&[], chunk_size, 0, 10).is_err());
+        assert!(chunk_ciphertext_span(&chunks, 0, 0, 10).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_decrypt_chunked_range_from_slice_round_trip() {
+        let provider = Arc::new(LocalKeyProvider::new().expect("provider"));
+        let service = EncryptionService::new(provider);
+
+        // 6 MiB → chunk 0 = 5 MiB, chunk 1 = 1 MiB.
+        let size = 6 * 1024 * 1024usize;
+        let plaintext: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let aad = b"bucket/key";
+
+        let enc = service
+            .encrypt_chunked(&plaintext, Some(aad))
+            .await
+            .expect("encrypt_chunked");
+        let sidecar = crate::storage::ObjectSseSidecar::from_encrypted(&enc, "bucket", "key");
+        assert_eq!(sidecar.chunks.len(), 2, "6 MiB must produce 2 chunks");
+
+        // Ranges: inside chunk 0, inside chunk 1 (non-zero file_start), spanning the boundary,
+        // and the final suffix bytes.
+        let ranges: &[(u64, u64)] = &[
+            (100, 200),
+            (5_300_000, 5_400_000),
+            (5_000_000, 5_400_000),
+            (size as u64 - 100, size as u64),
+        ];
+        for &(start, end) in ranges {
+            let span = chunk_ciphertext_span(&sidecar.chunks, sidecar.chunk_size, start, end)
+                .expect("span");
+            let slice = &enc.ciphertext[span.file_start as usize..span.file_end as usize];
+            let got = service
+                .decrypt_chunked_range_from_slice(
+                    &sidecar.kek_id,
+                    &sidecar.encrypted_dek,
+                    &sidecar.dek_nonce,
+                    &sidecar.chunks,
+                    &span,
+                    slice,
+                    start,
+                    end,
+                    aad,
+                )
+                .await
+                .expect("decrypt_chunked_range_from_slice");
+            assert_eq!(
+                got.as_slice(),
+                &plaintext[start as usize..end as usize],
+                "from_slice range [{start}, {end}) must match plaintext"
+            );
+
+            // The full-buffer convenience method must agree byte-for-byte.
+            let got_full = service
+                .decrypt_chunked_range(
+                    &sidecar.kek_id,
+                    &sidecar.encrypted_dek,
+                    &sidecar.dek_nonce,
+                    sidecar.chunk_size,
+                    &sidecar.chunks,
+                    &enc.ciphertext,
+                    start,
+                    end,
+                    aad,
+                )
+                .await
+                .expect("decrypt_chunked_range");
+            assert_eq!(got, got_full, "from_slice and full-buffer paths must agree");
+        }
     }
 }

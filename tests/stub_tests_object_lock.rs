@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Tests for S3 Object Lock API operations
 
 mod common;

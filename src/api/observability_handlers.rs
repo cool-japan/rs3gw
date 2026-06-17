@@ -8,7 +8,7 @@
 //! - `/api/observability/health` - Comprehensive health check with all metrics
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
@@ -437,6 +437,100 @@ pub async fn get_capacity_recommendations(State(state): State<AppState>) -> impl
             })),
         ),
     }
+}
+
+/// Query parameters for the usage report endpoint.
+#[derive(Debug, Deserialize)]
+pub struct UsageQuery {
+    /// When `true`, fire the registered usage export hooks in addition to
+    /// returning the report (e.g. emit it to logs / an external billing sink).
+    #[serde(default)]
+    pub flush: bool,
+}
+
+/// Collect live per-bucket storage stats as `(bucket, storage_bytes, object_count)`.
+///
+/// Read fresh from the storage engine so the figures are accurate regardless of
+/// overwrites / multipart / out-of-band changes (the usage tracker deliberately
+/// does not try to maintain a running storage total).
+async fn collect_bucket_storage_stats(state: &AppState) -> Vec<(String, u64, u64)> {
+    let mut stats = Vec::new();
+    if let Ok(buckets) = state.storage.list_buckets().await {
+        for bucket in buckets {
+            if let Ok((objects, _)) = state
+                .storage
+                .list_objects(&bucket.name, "", None, usize::MAX)
+                .await
+            {
+                let size: u64 = objects.iter().map(|o| o.size).sum();
+                let count = objects.len() as u64;
+                stats.push((bucket.name, size, count));
+            }
+        }
+    }
+    stats
+}
+
+/// `GET /api/usage` — full cost/usage report across all buckets.
+///
+/// Combines the usage tracker's cumulative per-bucket counters (transfer bytes,
+/// request counts) with live storage stats and an estimated cost breakdown.
+/// Pass `?flush=true` to also invoke registered export hooks.
+pub async fn get_usage(
+    State(state): State<AppState>,
+    Query(query): Query<UsageQuery>,
+) -> impl IntoResponse {
+    let stats = collect_bucket_storage_stats(&state).await;
+    let report = if query.flush {
+        state.usage_tracker.flush(&stats).await
+    } else {
+        state.usage_tracker.build_report(&stats).await
+    };
+    (StatusCode::OK, Json(report))
+}
+
+/// `GET /api/usage/{bucket}` — cost/usage for a single bucket.
+pub async fn get_bucket_usage(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.bucket_exists(&bucket).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "NoSuchBucket", "bucket": bucket })),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "InternalError" })),
+            )
+                .into_response();
+        }
+    }
+    let (size, count) = match state
+        .storage
+        .list_objects(&bucket, "", None, usize::MAX)
+        .await
+    {
+        Ok((objects, _)) => (objects.iter().map(|o| o.size).sum(), objects.len() as u64),
+        Err(_) => (0u64, 0u64),
+    };
+    let usage = state.usage_tracker.bucket_usage(&bucket, size, count).await;
+    (StatusCode::OK, Json(usage)).into_response()
+}
+
+/// `GET /metrics/exemplars` — recent per-operation latency exemplars.
+///
+/// Each exemplar carries the latency, HTTP status, and (when an OpenTelemetry
+/// trace was sampled for that request) the `trace_id`, so a slow-latency sample
+/// can be correlated with its distributed trace. This complements the Prometheus
+/// `/metrics` text, whose exporter cannot embed OpenMetrics exemplars inline.
+pub async fn get_metrics_exemplars() -> impl IntoResponse {
+    (StatusCode::OK, Json(crate::metrics::exemplars_snapshot()))
 }
 
 // Integration tests for observability handlers are in tests/observability_tests.rs

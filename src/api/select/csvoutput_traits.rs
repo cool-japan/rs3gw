@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! # CsvOutput - Trait Implementations
 //!
 //! This module contains trait implementations for `CsvOutput`.

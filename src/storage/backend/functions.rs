@@ -214,18 +214,22 @@ pub async fn create_backend_from_config(
             let backend = LocalBackend::new(Arc::new(engine));
             Ok(Arc::new(backend) as DynBackend)
         }
+        #[cfg(feature = "s3")]
         BackendType::MinIO => {
             let backend = MinIOBackend::new(config).await?;
             Ok(Arc::new(backend) as DynBackend)
         }
+        #[cfg(feature = "s3")]
         BackendType::S3 => {
             let backend = S3Backend::new(config).await?;
             Ok(Arc::new(backend) as DynBackend)
         }
+        #[cfg(feature = "gcs")]
         BackendType::Gcs => {
             let backend = GcsBackend::new(config).await?;
             Ok(Arc::new(backend) as DynBackend)
         }
+        #[cfg(feature = "azure")]
         BackendType::Azure => {
             let backend = AzureBackend::new(config).await?;
             Ok(Arc::new(backend) as DynBackend)

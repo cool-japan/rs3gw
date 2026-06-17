@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Tests for S3 ACL API operations (GetBucketAcl, PutBucketAcl, GetObjectAcl, PutObjectAcl)
 
 mod common;

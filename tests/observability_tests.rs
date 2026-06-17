@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Integration tests for observability API endpoints
 //!
 //! These tests verify the observability REST API endpoints that provide

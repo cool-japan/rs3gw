@@ -30,6 +30,7 @@ use super::functions_3::build_object_headers_with_sci;
 use crate::api::utils::error_response;
 
 /// Parse SelectObjectContent XML request
+#[cfg(feature = "formats")]
 pub(super) fn parse_select_request_xml(
     body: &[u8],
 ) -> Result<crate::api::select::SelectRequest, String> {
@@ -444,7 +445,7 @@ pub async fn head_object(
     headers: HeaderMap,
 ) -> Response {
     info!(bucket = % bucket, key = % key, "HeadObject");
-    let meta = match state.storage.head_object(&bucket, &key).await {
+    let mut meta = match state.storage.head_object(&bucket, &key).await {
         Ok(m) => m,
         Err(e) => return storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
     };
@@ -475,8 +476,33 @@ pub async fn head_object(
     // For SSE-C and SSE-KMS objects, augment the response with sidecar-derived headers.
     // The base builder (build_object_headers_with_sci) already emits the algorithm header.
     let sse_algo = meta.metadata.get("__sse_algorithm__").cloned();
+    let is_sse_object = sse_algo.is_some();
     let is_sse_c = sse_algo.as_deref() == Some("AES256-SSE-C");
     let is_sse_kms = sse_algo.as_deref() == Some("aws:kms");
+
+    // For SSE objects, `meta.size` is the on-disk size, which for single-PUT objects is the
+    // ciphertext length (plaintext + per-chunk GCM tags) and is therefore larger than the
+    // plaintext. AWS S3 reports the *plaintext* size in Content-Length for both GET and HEAD,
+    // so derive it from the sidecar and overwrite `meta.size` before building headers — this
+    // keeps HEAD consistent with the GET path (which sizes from the sidecar too). Best-effort:
+    // if the sidecar can't be loaded, fall back to the on-disk size rather than failing HEAD.
+    let sidecar_opt = if is_sse_object {
+        state
+            .storage
+            .get_object_sse(&bucket, &key)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    if let Some(ref sidecar) = sidecar_opt {
+        meta.size = if !sidecar.chunks.is_empty() {
+            sidecar.chunks.iter().map(|c| c.plaintext_len).sum()
+        } else {
+            crate::storage::encryption::single_shot_plaintext_len(sidecar.ciphertext_len)
+        };
+    }
 
     let base_response = build_object_headers_with_sci(meta, sci_meta);
 
@@ -484,13 +510,6 @@ pub async fn head_object(
         return base_response;
     }
 
-    // Fetch sidecar to get stored SSE metadata.
-    let sidecar_opt = state
-        .storage
-        .get_object_sse(&bucket, &key)
-        .await
-        .ok()
-        .flatten();
     let Some(sidecar) = sidecar_opt else {
         return base_response;
     };
@@ -523,6 +542,120 @@ pub async fn head_object(
     }
 
     Response::from_parts(parts, body)
+}
+
+/// Read the full ciphertext of an SSE object from disk and decrypt it to plaintext.
+///
+/// `state.storage.get_object` transparently decompresses ciphertext that was compressed on
+/// disk, so the bytes handed to the cipher are always raw ciphertext. SSE-C objects use the
+/// customer-supplied key (MD5-validated against the value stored at PUT time); SSE-S3 and
+/// SSE-KMS objects use the server-managed KEK via the v1/v2 dispatch in `decrypt`. An empty
+/// object (0 ciphertext bytes) decrypts to empty plaintext without invoking the cipher — an
+/// empty single-shot payload has no nonce and would otherwise be rejected.
+///
+/// On any failure it returns a ready-to-send error [`Response`].
+async fn read_full_sse_plaintext(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    sidecar: &ObjectSseSidecar,
+    is_sse_c: bool,
+    customer_key: Option<[u8; 32]>,
+) -> Result<Vec<u8>, Response> {
+    let path_ctx = format!("/{}/{}", bucket, key);
+
+    let (_m, stream) = match state.storage.get_object(bucket, key).await {
+        Ok(v) => v,
+        Err(e) => return Err(storage_error_to_response(e, &path_ctx)),
+    };
+    let ciphertext: Vec<u8> = {
+        use futures::StreamExt;
+        let mut collected = Vec::new();
+        let mut s = stream;
+        while let Some(chunk) = s.next().await {
+            match chunk {
+                Ok(bytes) => collected.extend_from_slice(&bytes),
+                Err(e) => {
+                    return Err(error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        &format!("Failed to read encrypted object: {}", e),
+                        &path_ctx,
+                    ));
+                }
+            }
+        }
+        collected
+    };
+
+    // Empty object: no ciphertext → empty plaintext (an empty single-shot payload has no nonce).
+    if ciphertext.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if is_sse_c {
+        let customer_key = match customer_key {
+            Some(k) => k,
+            None => {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "SSE-C object requires x-amz-server-side-encryption-customer-key on GET",
+                    &path_ctx,
+                ));
+            }
+        };
+        // Validate the customer key MD5 against what was stored at PUT time.
+        let computed_md5_b64 =
+            base64::engine::general_purpose::STANDARD.encode(md5::compute(customer_key).0);
+        if let Some(ref stored_md5) = sidecar.customer_key_md5 {
+            if stored_md5 != &computed_md5_b64 {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "The provided customer key does not match the key used to encrypt the object",
+                    &path_ctx,
+                ));
+            }
+        }
+        let aad = format!("{}/{}", sidecar.aad_bucket, sidecar.aad_key);
+        let enc_data = EncryptedData {
+            algorithm: crate::storage::encryption::EncryptionAlgorithm::Aes256Gcm,
+            encrypted_dek: sidecar.encrypted_dek.clone(),
+            kek_id: sidecar.kek_id.clone(),
+            dek_nonce: sidecar.dek_nonce.clone(),
+            ciphertext,
+            payload_nonce: sidecar.payload_nonce.clone(),
+            aad: Some(aad.into_bytes()),
+            chunks: vec![],
+            chunk_size: 0,
+        };
+        match state
+            .encryption
+            .decrypt_with_customer_key(&enc_data, &customer_key)
+            .await
+        {
+            Ok(p) => Ok(p),
+            Err(_) => Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "SSE-C decryption failed",
+                &path_ctx,
+            )),
+        }
+    } else {
+        // SSE-S3 / SSE-KMS (v1 single-shot or v2 chunked): decrypt dispatches on `chunks`.
+        let enc_data = sidecar.into_encrypted_data(ciphertext);
+        match state.encryption.decrypt(&enc_data).await {
+            Ok(p) => Ok(p),
+            Err(e) => Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                &format!("Decryption failed: {}", e),
+                &path_ctx,
+            )),
+        }
+    }
 }
 /// Get an object
 #[utoipa::path(
@@ -576,8 +709,40 @@ pub async fn get_object(
         }
         ConditionalResult::Proceed => {}
     }
+    // SSE objects store ciphertext on disk, and `meta.size` is unreliable for them (ciphertext
+    // size for single-PUT objects, plaintext size for multipart). Load the SSE sidecar up front
+    // so we can size the range in plaintext coordinates and, for v2 (chunked) objects, read only
+    // the ciphertext bytes covering the requested chunks on a range-GET.
+    let sse_algo = meta.metadata.get("__sse_algorithm__").cloned();
+    let is_sse_object = sse_algo.is_some();
+    let is_sse_c = sse_algo.as_deref() == Some("AES256-SSE-C");
+
+    let sse_sidecar: Option<ObjectSseSidecar> = if is_sse_object {
+        match state.storage.get_object_sse(&bucket, &key).await {
+            Ok(Some(s)) => Some(s),
+            Ok(None) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "SSE sidecar missing for encrypted object",
+                    &format!("/{}/{}", bucket, key),
+                );
+            }
+            Err(e) => return storage_error_to_response(e, &format!("/{}/{}", bucket, key)),
+        }
+    } else {
+        None
+    };
+
+    // Logical (plaintext) size: derived from the sidecar for SSE objects, else `meta.size`.
+    let logical_size: u64 = match &sse_sidecar {
+        Some(sc) if !sc.chunks.is_empty() => sc.chunks.iter().map(|c| c.plaintext_len).sum(),
+        Some(sc) => crate::storage::encryption::single_shot_plaintext_len(sc.ciphertext_len),
+        None => meta.size,
+    };
+
     let range = if let Some(range_str) = range_header {
-        match ByteRange::parse(range_str, meta.size) {
+        match ByteRange::parse(range_str, logical_size) {
             Ok(r) => Some(r),
             Err(e) => {
                 warn!(range = % range_str, "Invalid range header");
@@ -587,56 +752,12 @@ pub async fn get_object(
     } else {
         None
     };
-    // D3: SSE objects store ciphertext on disk — range-reads of partial ciphertext cannot be
-    //     authenticated by AES-GCM.  When the object is SSE-encrypted, always read the full
-    //     ciphertext regardless of the range header; the API layer decrypts and then slices.
-    //     TODO(session-6): chunked AEAD for seekable range-GET without full decrypt.
-    let is_sse_object = meta.metadata.contains_key("__sse_algorithm__");
 
-    let (response_meta, stream, status, content_length, content_range) = if let Some(ref r) = range
-    {
-        if is_sse_object {
-            // Full read — slicing happens after decrypt below.
-            match state.storage.get_object(&bucket, &key).await {
-                Ok((m, s)) => {
-                    let size = m.size;
-                    (m, s, StatusCode::PARTIAL_CONTENT, size, None)
-                }
-                Err(e) => {
-                    return storage_error_to_response(e, &format!("/{}/{}", bucket, key));
-                }
-            }
-        } else {
-            match state.storage.get_object_range(&bucket, &key, r).await {
-                Ok((m, s)) => {
-                    let content_range = format!("bytes {}-{}/{}", r.start, r.end, m.size);
-                    (
-                        m,
-                        s,
-                        StatusCode::PARTIAL_CONTENT,
-                        r.length(),
-                        Some(content_range),
-                    )
-                }
-                Err(e) => {
-                    return storage_error_to_response(e, &format!("/{}/{}", bucket, key));
-                }
-            }
-        }
+    let status = if range.is_some() {
+        StatusCode::PARTIAL_CONTENT
     } else {
-        match state.storage.get_object(&bucket, &key).await {
-            Ok((m, s)) => {
-                let size = m.size;
-                (m, s, StatusCode::OK, size, None)
-            }
-            Err(e) => {
-                return storage_error_to_response(e, &format!("/{}/{}", bucket, key));
-            }
-        }
+        StatusCode::OK
     };
-    // Detect SSE: if __sse_algorithm__ is set, on-disk bytes are ciphertext.
-    let sse_algo = response_meta.metadata.get("__sse_algorithm__").cloned();
-    let is_sse_c = sse_algo.as_deref() == Some("AES256-SSE-C");
 
     // SSE-C objects require the client to supply the customer key on GET.
     // Validate the key before reading any bytes.
@@ -686,206 +807,189 @@ pub async fn get_object(
         None
     };
 
-    // For SSE objects, decrypt before serving.
-    // D3: For range-GET on SSE objects, decrypt full object then slice the plaintext.
-    //     TODO(session-6): chunked AEAD for seekable range-GET without full decrypt.
-    let (final_body, final_content_length, final_content_range) = if sse_algo.is_some() {
-        // Consume whatever stream was opened — replace with plaintext.
-        let ciphertext: Vec<u8> = {
-            use futures::StreamExt;
-            let mut collected = Vec::new();
-            let mut s = stream;
-            while let Some(chunk) = s.next().await {
-                match chunk {
-                    Ok(bytes) => collected.extend_from_slice(&bytes),
-                    Err(e) => {
-                        return error_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "InternalError",
-                            &format!("Failed to read encrypted object: {}", e),
-                            &format!("/{}/{}", bucket, key),
-                        );
-                    }
-                }
-            }
-            collected
-        };
+    // For SSE objects the on-disk bytes are ciphertext. For a v2 (chunked) range-GET on an
+    // uncompressed object we read only the ciphertext span covering the requested chunks and
+    // decrypt those chunks (seekable — no full-object read). Every other SSE case reads the
+    // full ciphertext and decrypts it; range slicing then happens on the plaintext.
+    let (final_body, final_content_length, final_content_range) =
+        if let Some(sidecar) = sse_sidecar.as_ref() {
+            // A raw seek into a compressed-on-disk ciphertext file is invalid, so the seekable
+            // path only applies to uncompressed v2 chunked objects.
+            let is_compressed = meta.metadata.contains_key("__compression__");
+            let chunked_seekable = !is_sse_c && !is_compressed && !sidecar.chunks.is_empty();
 
-        let sidecar: ObjectSseSidecar = match state.storage.get_object_sse(&bucket, &key).await {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "InternalError",
-                    "SSE sidecar missing for encrypted object",
-                    &format!("/{}/{}", bucket, key),
-                );
-            }
-            Err(e) => {
-                return storage_error_to_response(e, &format!("/{}/{}", bucket, key));
-            }
-        };
-
-        let plaintext = if is_sse_c {
-            // SSE-C path: validate MD5 then decrypt with customer key.
-            let customer_key =
-                sse_c_customer_key.expect("sse_c_customer_key set above when is_sse_c");
-
-            // Validate customer key MD5 against what was stored at PUT time.
-            let computed_md5_b64 =
-                base64::engine::general_purpose::STANDARD.encode(md5::compute(customer_key).0);
-            if let Some(ref stored_md5) = sidecar.customer_key_md5 {
-                if stored_md5 != &computed_md5_b64 {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidArgument",
-                        "The provided customer key does not match the key used to encrypt the object",
-                        &format!("/{}/{}", bucket, key),
-                    );
-                }
-            }
-
-            // Build EncryptedData for SSE-C (customer key was used as KEK).
-            let aad = format!("{}/{}", sidecar.aad_bucket, sidecar.aad_key);
-            let enc_data = EncryptedData {
-                algorithm: crate::storage::encryption::EncryptionAlgorithm::Aes256Gcm,
-                encrypted_dek: sidecar.encrypted_dek.clone(),
-                kek_id: sidecar.kek_id.clone(),
-                dek_nonce: sidecar.dek_nonce.clone(),
-                ciphertext,
-                payload_nonce: sidecar.payload_nonce.clone(),
-                aad: Some(aad.into_bytes()),
-                chunks: vec![],
-                chunk_size: 0,
-            };
-
-            match state
-                .encryption
-                .decrypt_with_customer_key(&enc_data, &customer_key)
-                .await
-            {
-                Ok(p) => p,
-                Err(_) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "InternalError",
-                        "SSE-C decryption failed",
-                        &format!("/{}/{}", bucket, key),
-                    );
-                }
-            }
-        } else if !sidecar.chunks.is_empty() {
-            // v2 chunked SSE-S3/SSE-KMS: use chunked range decrypt or full-object decrypt.
             if let Some(ref r) = range {
-                // Decode only chunks covering the requested byte range.
-                let aad_prefix = format!("{}/{}", sidecar.aad_bucket, sidecar.aad_key);
-                // r.end is inclusive; decrypt_chunked_range expects exclusive end.
+                // r.end is inclusive; chunk helpers expect an exclusive end.
                 let range_end_exclusive = r.end + 1;
-                match state
-                    .encryption
-                    .decrypt_chunked_range(
-                        &sidecar.kek_id,
-                        &sidecar.encrypted_dek,
-                        &sidecar.dek_nonce,
-                        sidecar.chunk_size,
+                if chunked_seekable {
+                    let span = match crate::storage::encryption::chunk_ciphertext_span(
                         &sidecar.chunks,
-                        &ciphertext,
+                        sidecar.chunk_size,
                         r.start,
                         range_end_exclusive,
-                        aad_prefix.as_bytes(),
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "InternalError",
+                                &format!("Range computation failed: {}", e),
+                                &format!("/{}/{}", bucket, key),
+                            );
+                        }
+                    };
+                    // Read ONLY the covering ciphertext bytes from disk.
+                    let chunk_ct = match state
+                        .storage
+                        .read_object_ciphertext_range(&bucket, &key, span.file_start, span.file_end)
+                        .await
+                    {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return storage_error_to_response(e, &format!("/{}/{}", bucket, key));
+                        }
+                    };
+                    let aad_prefix = format!("{}/{}", sidecar.aad_bucket, sidecar.aad_key);
+                    let slice = match state
+                        .encryption
+                        .decrypt_chunked_range_from_slice(
+                            &sidecar.kek_id,
+                            &sidecar.encrypted_dek,
+                            &sidecar.dek_nonce,
+                            &sidecar.chunks,
+                            &span,
+                            &chunk_ct,
+                            r.start,
+                            range_end_exclusive,
+                            aad_prefix.as_bytes(),
+                        )
+                        .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "InternalError",
+                                &format!("Chunked range decryption failed: {}", e),
+                                &format!("/{}/{}", bucket, key),
+                            );
+                        }
+                    };
+                    let slice_len = slice.len() as u64;
+                    let cr = Some(format!(
+                        "bytes {}-{}/{}",
+                        r.start,
+                        r.start + slice_len - 1,
+                        logical_size,
+                    ));
+                    (Body::from(bytes::Bytes::from(slice)), slice_len, cr)
+                } else {
+                    // SSE-C, compressed, or v1 single-shot: full read + decrypt, then slice.
+                    let plaintext = match read_full_sse_plaintext(
+                        &state,
+                        &bucket,
+                        &key,
+                        sidecar,
+                        is_sse_c,
+                        sse_c_customer_key,
                     )
                     .await
-                {
-                    Ok(slice) => slice,
-                    Err(e) => {
-                        return error_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "InternalError",
-                            &format!("Chunked range decryption failed: {}", e),
+                    {
+                        Ok(p) => p,
+                        Err(resp) => return resp,
+                    };
+                    let start = r.start as usize;
+                    if start >= plaintext.len() {
+                        return storage_error_to_response(
+                            StorageError::InvalidRange,
                             &format!("/{}/{}", bucket, key),
                         );
+                    }
+                    let end = (r.end as usize + 1).min(plaintext.len());
+                    let slice = plaintext[start..end].to_vec();
+                    let slice_len = slice.len() as u64;
+                    let cr = Some(format!(
+                        "bytes {}-{}/{}",
+                        r.start,
+                        r.start + slice_len - 1,
+                        plaintext.len()
+                    ));
+                    (Body::from(bytes::Bytes::from(slice)), slice_len, cr)
+                }
+            } else {
+                // Full-object GET on an SSE object.
+                let plaintext = match read_full_sse_plaintext(
+                    &state,
+                    &bucket,
+                    &key,
+                    sidecar,
+                    is_sse_c,
+                    sse_c_customer_key,
+                )
+                .await
+                {
+                    Ok(p) => p,
+                    Err(resp) => return resp,
+                };
+                // D2: decrypt-then-hash. Validate the stored plaintext SHA-256 digest against
+                // the just-decrypted bytes (full-object GET only; range bodies are partial).
+                // This is end-to-end integrity on top of the AEAD tags checked during decrypt.
+                if let (Some(algo), Some(stored)) = (
+                    meta.metadata.get("__checksum_algo__"),
+                    meta.metadata.get("__checksum_value__"),
+                ) {
+                    if algo == "sha256" {
+                        let computed = base64::engine::general_purpose::STANDARD
+                            .encode(<sha2::Sha256 as sha2::Digest>::digest(&plaintext));
+                        if &computed != stored {
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "InternalError",
+                                "checksum mismatch: object data corrupted",
+                                &format!("/{}/{}", bucket, key),
+                            );
+                        }
+                    }
+                }
+                let len = plaintext.len() as u64;
+                (Body::from(bytes::Bytes::from(plaintext)), len, None)
+            }
+        } else {
+            // Non-SSE object: stream from disk (seekable for range). Unchanged behavior.
+            let (stream, content_length, content_range) = if let Some(ref r) = range {
+                match state.storage.get_object_range(&bucket, &key, r).await {
+                    Ok((m, s)) => {
+                        let content_range = format!("bytes {}-{}/{}", r.start, r.end, m.size);
+                        (s, r.length(), Some(content_range))
+                    }
+                    Err(e) => {
+                        return storage_error_to_response(e, &format!("/{}/{}", bucket, key));
                     }
                 }
             } else {
-                // Full object GET for v2: decrypt all chunks via dispatch.
-                let enc_data = sidecar.into_encrypted_data(ciphertext);
-                match state.encryption.decrypt(&enc_data).await {
-                    Ok(p) => p,
+                match state.storage.get_object(&bucket, &key).await {
+                    Ok((m, s)) => {
+                        let size = m.size;
+                        (s, size, None)
+                    }
                     Err(e) => {
-                        return error_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "InternalError",
-                            &format!("Decryption failed: {}", e),
-                            &format!("/{}/{}", bucket, key),
-                        );
+                        return storage_error_to_response(e, &format!("/{}/{}", bucket, key));
                     }
                 }
-            }
-        } else {
-            // v1 single-shot SSE-S3/SSE-KMS: decrypt with server-managed KEK.
-            let enc_data = sidecar.into_encrypted_data(ciphertext);
-            match state.encryption.decrypt(&enc_data).await {
-                Ok(p) => p,
-                Err(e) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "InternalError",
-                        &format!("Decryption failed: {}", e),
-                        &format!("/{}/{}", bucket, key),
-                    );
-                }
-            }
+            };
+            let body = Body::from_stream(stream.map_err(|e| std::io::Error::other(e.to_string())));
+            (body, content_length, content_range)
         };
 
-        // Build the final (body, len, content-range) tuple from plaintext.
-        // This path is taken for: SSE-C (any), v1 SSE-S3/KMS, v2 full-object GET,
-        // and v2 range-GET (slice returned above is treated as the full plaintext here).
-        if let Some(ref r) = range {
-            let start = r.start as usize;
-            // For v2 range-GET the plaintext is already sliced; treat as full range.
-            let is_v2_range = !is_sse_c && !sidecar.chunks.is_empty();
-            if is_v2_range {
-                // plaintext already contains exactly the requested bytes.
-                let total_plain: u64 = sidecar.chunks.iter().map(|c| c.plaintext_len).sum();
-                let slice_len = plaintext.len() as u64;
-                let cr = Some(format!(
-                    "bytes {}-{}/{}",
-                    r.start,
-                    r.start + slice_len - 1,
-                    total_plain,
-                ));
-                (Body::from(bytes::Bytes::from(plaintext)), slice_len, cr)
-            } else {
-                let end = (r.end as usize + 1).min(plaintext.len());
-                if start >= plaintext.len() {
-                    return storage_error_to_response(
-                        StorageError::InvalidRange,
-                        &format!("/{}/{}", bucket, key),
-                    );
-                }
-                let slice = plaintext[start..end].to_vec();
-                let slice_len = slice.len() as u64;
-                let cr = Some(format!(
-                    "bytes {}-{}/{}",
-                    r.start,
-                    r.start + slice_len - 1,
-                    plaintext.len()
-                ));
-                (Body::from(bytes::Bytes::from(slice)), slice_len, cr)
-            }
-        } else {
-            let len = plaintext.len() as u64;
-            (Body::from(bytes::Bytes::from(plaintext)), len, None)
-        }
-    } else {
-        // Plaintext (no SSE): stream as-is.
-        let body = Body::from_stream(stream.map_err(|e| std::io::Error::other(e.to_string())));
-        (body, content_length, content_range)
-    };
+    let response_meta = meta;
 
     state
         .metrics_tracker
         .record_bytes_downloaded(final_content_length);
+    state
+        .usage_tracker
+        .record_get(&bucket, final_content_length)
+        .await;
 
     let mut response = Response::builder()
         .status(status)
@@ -914,8 +1018,8 @@ pub async fn get_object(
         }
         Some("AES256-SSE-C") => {
             response = response.header("x-amz-server-side-encryption-customer-algorithm", "AES256");
-            // Include customer-key-MD5 in GET response (requires sidecar lookup).
-            if let Ok(Some(ref sc)) = state.storage.get_object_sse(&bucket, &key).await {
+            // Include customer-key-MD5 in GET response (from the sidecar loaded above).
+            if let Some(ref sc) = sse_sidecar {
                 if let Some(ref md5) = sc.customer_key_md5 {
                     response = response.header(
                         "x-amz-server-side-encryption-customer-key-md5",
@@ -926,8 +1030,8 @@ pub async fn get_object(
         }
         Some("aws:kms") => {
             response = response.header("x-amz-server-side-encryption", "aws:kms");
-            // Include KMS key ARN in GET response (requires sidecar lookup).
-            if let Ok(Some(ref sc)) = state.storage.get_object_sse(&bucket, &key).await {
+            // Include KMS key ARN in GET response (from the sidecar loaded above).
+            if let Some(ref sc) = sse_sidecar {
                 if let Some(ref kms_key_id) = sc.kms_master_key_id {
                     response = response.header(
                         "x-amz-server-side-encryption-aws-kms-key-id",

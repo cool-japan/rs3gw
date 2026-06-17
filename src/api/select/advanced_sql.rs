@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! Advanced SQL features for S3 Select
 //!
 //! Implements JOIN operations, Window Functions, and Common Table Expressions (CTEs)

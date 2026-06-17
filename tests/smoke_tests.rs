@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! End-to-end smoke tests for rs3gw
 //!
 //! Exercises the full object lifecycle: create bucket, PUT, HEAD, GET,
@@ -145,6 +146,71 @@ async fn test_full_lifecycle_smoke() {
         head_bucket_gone.is_err(),
         "HeadBucket should fail after deletion"
     );
+}
+
+/// Smoke test: operational endpoints are reachable.
+///
+/// `/health` must return 200 (k8s liveness/readiness probes depend on it) and
+/// `/metrics` must return 200 with a non-empty Prometheus text body (scrapers
+/// depend on it). Guards the "Metrics/Health endpoint reachable" release items.
+#[tokio::test]
+async fn test_ops_endpoints_reachable() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    let http = reqwest::Client::new();
+
+    let health = http
+        .get(format!("{}/health", server.base_url))
+        .send()
+        .await
+        .expect("GET /health should complete");
+    assert_eq!(health.status(), 200, "/health must return 200");
+
+    let metrics = http
+        .get(format!("{}/metrics", server.base_url))
+        .send()
+        .await
+        .expect("GET /metrics should complete");
+    assert_eq!(metrics.status(), 200, "/metrics must return 200");
+    let body = metrics.text().await.expect("read /metrics body");
+    assert!(
+        !body.is_empty(),
+        "/metrics must return a non-empty Prometheus exposition body"
+    );
+}
+
+/// Smoke test: the latency-exemplars endpoint serves seeded exemplars.
+///
+/// The exemplar store is a process-global shared between the in-process test
+/// server and the test code, so seeding via the public `record_exemplar` API and
+/// then scraping `/metrics/exemplars` exercises the store → endpoint → JSON path
+/// end-to-end (independent of whether the metrics middleware is wired in tests).
+#[tokio::test]
+async fn test_metrics_exemplars_endpoint() {
+    let (_client, _temp_dir, server) = setup_test_server().await;
+    rs3gw::metrics::record_exemplar(
+        "SmokeExemplarOp",
+        12.5,
+        200,
+        Some("trace-abc-123".to_string()),
+    );
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .get(format!("{}/metrics/exemplars", server.base_url))
+        .send()
+        .await
+        .expect("GET /metrics/exemplars");
+    assert_eq!(resp.status(), 200, "/metrics/exemplars must return 200");
+    let body: serde_json::Value = resp.json().await.expect("exemplars json");
+    let items = body.as_array().expect("exemplars must be a JSON array");
+    let found = items
+        .iter()
+        .find(|e| e["operation"] == "SmokeExemplarOp")
+        .expect("seeded exemplar must be present");
+    assert_eq!(found["trace_id"], "trace-abc-123");
+    assert_eq!(found["status"], 200);
+    assert!((found["latency_ms"].as_f64().expect("latency") - 12.5).abs() < 1e-9);
+    assert!(found["timestamp_unix_ms"].as_u64().is_some());
 }
 
 /// Smoke test: multiple objects in one bucket with prefix listing

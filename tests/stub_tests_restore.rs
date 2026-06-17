@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Tests for S3 RestoreObject API operation
 
 mod common;

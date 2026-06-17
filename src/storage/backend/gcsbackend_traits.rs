@@ -28,6 +28,8 @@
 //! | Object labels (via tags) | Object tags      |
 //! | IAM policy               | Bucket policy    |
 
+#![cfg(feature = "gcs")]
+
 use crate::storage::{
     BucketMetadata, ByteRange, MultipartUpload, ObjectMetadata, PartMetadata, StorageError,
     StorageStats,

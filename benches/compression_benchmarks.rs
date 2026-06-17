@@ -128,8 +128,7 @@ fn bench_lz4_decompression(c: &mut Criterion) {
             &compressed,
             |b, compressed_data| {
                 b.iter(|| {
-                    let decompressed =
-                        lz4_decompress_size_prepended(black_box(compressed_data));
+                    let decompressed = lz4_decompress_size_prepended(black_box(compressed_data));
                     black_box(decompressed);
                 });
             },
@@ -154,8 +153,8 @@ fn bench_compression_ratio(c: &mut Criterion) {
             &data,
             |b, data| {
                 b.iter(|| {
-                    let compressed =
-                        oxiarc_zstd::encode_all(black_box(&data[..]), 3).expect("Failed to compress");
+                    let compressed = oxiarc_zstd::encode_all(black_box(&data[..]), 3)
+                        .expect("Failed to compress");
                     black_box(compressed);
                 });
             },

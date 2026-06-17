@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! AWS SDK Compatibility Integration Tests for rs3gw (Extended)
 //!
 //! Covers:

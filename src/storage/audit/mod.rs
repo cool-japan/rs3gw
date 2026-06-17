@@ -41,6 +41,7 @@ pub struct AuditLogger {
     current_file: Arc<RwLock<Option<File>>>,
     current_size: Arc<RwLock<u64>>,
     security_detector: Arc<SecurityEventDetector>,
+    #[cfg(feature = "s3")]
     s3_client: Option<Arc<aws_sdk_s3::Client>>,
 }
 
@@ -67,6 +68,7 @@ impl AuditLogger {
         let security_detector = Arc::new(SecurityEventDetector::new());
 
         // Initialize S3 client if S3 forwarding is configured
+        #[cfg(feature = "s3")]
         let s3_client = if config
             .forward_destinations
             .iter()
@@ -80,7 +82,10 @@ impl AuditLogger {
             None
         };
 
+        #[cfg(feature = "s3")]
         info!(path = ?config.log_path, s3_enabled = s3_client.is_some(), "Audit logger initialized");
+        #[cfg(not(feature = "s3"))]
+        info!(path = ?config.log_path, "Audit logger initialized");
 
         Ok(Self {
             config,
@@ -88,6 +93,7 @@ impl AuditLogger {
             current_file: Arc::new(RwLock::new(Some(file))),
             current_size: Arc::new(RwLock::new(current_size)),
             security_detector,
+            #[cfg(feature = "s3")]
             s3_client,
         })
     }
@@ -357,17 +363,25 @@ impl AuditLogger {
     ) -> AuditResult<()> {
         match dest {
             ForwardDestination::Webhook { url, headers } => {
-                let client = reqwest::Client::new();
-                let mut request = client.post(url).json(event);
+                #[cfg(feature = "server")]
+                {
+                    let client = reqwest::Client::new();
+                    let mut request = client.post(url).json(event);
 
-                for (key, value) in headers {
-                    request = request.header(key, value);
+                    for (key, value) in headers {
+                        request = request.header(key, value);
+                    }
+
+                    request
+                        .send()
+                        .await
+                        .map_err(|e| AuditError::Forwarding(e.to_string()))?;
                 }
-
-                request
-                    .send()
-                    .await
-                    .map_err(|e| AuditError::Forwarding(e.to_string()))?;
+                #[cfg(not(feature = "server"))]
+                {
+                    let _ = (url, headers);
+                    debug!("Webhook audit forwarding requires the 'server' feature; skipping");
+                }
             }
 
             ForwardDestination::File { path } => {
@@ -448,6 +462,14 @@ impl AuditLogger {
                 prefix,
                 region,
             } => {
+                #[cfg(not(feature = "s3"))]
+                {
+                    let _ = (bucket, prefix, region);
+                    return Err(AuditError::Forwarding(
+                        "S3 forwarding requires the 's3' feature to be enabled".to_string(),
+                    ));
+                }
+                #[cfg(feature = "s3")]
                 if let Some(client) = &self.s3_client {
                     // Generate S3 key: prefix/YYYY-MM-DD/HH-MM-SS-event_id.json
                     let timestamp = event.timestamp.format("%Y-%m-%d/%H-%M-%S").to_string();

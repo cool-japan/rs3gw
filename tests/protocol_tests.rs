@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Protocol correctness tests for rs3gw
 //!
 //! Tests covering:

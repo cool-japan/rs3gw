@@ -1,6 +1,8 @@
 // S3 Migration Tool for rs3gw
 // Migrate data between S3-compatible storage systems
 
+#![cfg(feature = "s3")]
+
 use anyhow::{Context, Result};
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{config::Region, Client as S3Client};

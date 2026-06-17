@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Tests for S3 API stub operations (versioning, ACL, encryption, etc.)
 
 mod common;

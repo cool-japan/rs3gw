@@ -10,11 +10,15 @@
 //! - **Conflict Resolution**: Last-writer-wins based on vector clocks
 //! - **Health Checking**: Periodic heartbeats to detect node failures
 
+#[cfg(feature = "server")]
 pub mod advanced_replication;
 pub mod config;
+#[cfg(feature = "server")]
 pub mod node;
+#[cfg(feature = "server")]
 pub mod replication;
 
+#[cfg(feature = "server")]
 pub use advanced_replication::{
     AdvancedReplicationError, AdvancedReplicationManager, AdvancedReplicationResult,
     ConflictResolution, ConflictResolutionResult, CrossRegionConfig, DestinationMetrics,
@@ -22,5 +26,7 @@ pub use advanced_replication::{
     ReplicationFilter, ReplicationMetrics,
 };
 pub use config::{ClusterConfig, ReplicationConfig, ReplicationMode};
+#[cfg(feature = "server")]
 pub use node::{ClusterNode, NodeId, NodeInfo, NodeRegistry, NodeState};
+#[cfg(feature = "server")]
 pub use replication::{ReplicationEvent, ReplicationManager, ReplicationResult};

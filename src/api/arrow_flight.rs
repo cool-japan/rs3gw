@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! Apache Arrow Flight Integration
 //!
 //! Provides high-performance data transfer using Apache Arrow Flight protocol
@@ -641,6 +642,7 @@ mod tests {
             preprocessing_manager,
             predictive_analytics,
             metrics_tracker,
+            usage_tracker: Arc::new(crate::observability::UsageTracker::new()),
             training_manager: Arc::new(TrainingManager::new(temp_dir.join("training"))),
             start_time: std::time::Instant::now(),
             verifier: None,

@@ -488,6 +488,7 @@ mod tests {
         let metrics_tracker = Arc::new(crate::observability::MetricsTracker::new());
         let select_result_cache =
             Arc::new(crate::api::SelectResultCache::new(100, 10 * 1024 * 1024));
+        #[cfg(feature = "formats")]
         let query_intelligence = Arc::new(crate::api::QueryIntelligence::new());
 
         let config = crate::Config {
@@ -519,13 +520,16 @@ mod tests {
             throttle: None,
             quota: None,
             event_broadcaster: crate::api::EventBroadcaster::new(),
+            #[cfg(feature = "formats")]
             query_plan_cache: None,
             select_result_cache,
+            #[cfg(feature = "formats")]
             query_intelligence,
             advanced_replication: None,
             preprocessing_manager,
             predictive_analytics,
             metrics_tracker,
+            usage_tracker: std::sync::Arc::new(crate::observability::UsageTracker::new()),
             training_manager: manager,
             start_time: std::time::Instant::now(),
             verifier: None,

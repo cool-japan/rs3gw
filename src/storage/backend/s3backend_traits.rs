@@ -8,6 +8,8 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+#![cfg(feature = "s3")]
+
 use crate::storage::{
     BucketMetadata, ByteRange, MultipartUpload, ObjectMetadata, PartMetadata, StorageError,
     StorageStats,

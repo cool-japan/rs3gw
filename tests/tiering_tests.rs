@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 //! Integration tests for Intelligent Tiering API endpoints
 
 mod common;

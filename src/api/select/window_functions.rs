@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! Window function execution for S3 Select
 //!
 //! Implements ROW_NUMBER, RANK, DENSE_RANK, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTILE

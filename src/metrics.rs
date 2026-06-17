@@ -2,21 +2,35 @@
 //!
 //! Provides Prometheus metrics for monitoring rs3gw performance and health.
 
-use std::sync::{Mutex, Once};
+use std::collections::{HashMap, VecDeque};
+#[cfg(feature = "server")]
+use std::sync::Once;
+use std::sync::{LazyLock, Mutex};
+#[cfg(feature = "server")]
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "server")]
 use axum::{body::Body, extract::Request, http::Method, middleware::Next, response::Response};
+#[cfg(feature = "server")]
+use metrics::describe_histogram;
+#[cfg(feature = "server")]
 use metrics::Unit;
-use metrics::{counter, describe_histogram, gauge, histogram};
+use metrics::{counter, gauge, histogram};
+#[cfg(feature = "server")]
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use serde::Serialize;
 
 /// Global metrics initialization state
+#[cfg(feature = "server")]
 static METRICS_INIT: Once = Once::new();
+#[cfg(feature = "server")]
 static METRICS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 
 /// Histogram bucket boundaries for request duration (ms)
 ///
 /// Buckets: 0.1ms, 1ms, 5ms, 10ms, 50ms, 100ms, 500ms, 1s, 5s, 60s
+#[cfg(feature = "server")]
 const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.1, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 60000.0,
 ];
@@ -24,6 +38,7 @@ const REQUEST_DURATION_BUCKETS: &[f64] = &[
 /// Histogram bucket boundaries for object sizes (bytes)
 ///
 /// Buckets: 1KB, 64KB, 1MB, 10MB, 100MB, 1GB
+#[cfg(feature = "server")]
 const OBJECT_SIZE_BUCKETS: &[f64] = &[
     1024.0,
     65536.0,
@@ -34,15 +49,94 @@ const OBJECT_SIZE_BUCKETS: &[f64] = &[
 ];
 
 /// Histogram bucket boundaries for dedup savings ratio (0.0 – 1.0)
+#[cfg(feature = "server")]
 const DEDUP_SAVINGS_RATIO_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
 
 /// Histogram bucket boundaries for compression ratio (compressed/original, 0.0 – 1.0+)
+#[cfg(feature = "server")]
 const COMPRESSION_RATIO_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.25];
+
+/// Maximum number of latency exemplars retained per operation (recent ring).
+const MAX_EXEMPLARS_PER_OP: usize = 16;
+
+/// A latency exemplar: a single request's latency correlated with the active
+/// OpenTelemetry trace, so operators can jump from a slow-latency sample to its
+/// distributed trace.
+///
+/// `metrics-exporter-prometheus` 0.18 cannot emit OpenMetrics exemplars inline
+/// in the `/metrics` text, so exemplars are kept in this side store and exposed
+/// via `/metrics/exemplars`. `trace_id` is empty when no sampled trace was active
+/// (e.g. tracing disabled), which makes the latency samples useful even without
+/// OpenTelemetry while populating trace IDs automatically when it is enabled.
+#[derive(Debug, Clone, Serialize)]
+pub struct Exemplar {
+    pub operation: String,
+    pub latency_ms: f64,
+    pub status: u16,
+    /// OpenTelemetry trace id (hex), or empty if no sampled trace was active.
+    pub trace_id: String,
+    pub timestamp_unix_ms: u64,
+}
+
+/// Recent latency exemplars, keyed by operation (bounded ring per operation).
+static EXEMPLAR_STORE: LazyLock<Mutex<HashMap<String, VecDeque<Exemplar>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Extract the active OpenTelemetry `trace_id`, if a valid (sampled) span is current.
+///
+/// Returns `None` when no OpenTelemetry layer is installed or the current span has
+/// no valid trace context (so exemplar trace IDs populate only when tracing is on).
+#[cfg(feature = "server")]
+fn current_trace_id() -> Option<String> {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let span_context = span.span_context();
+    if span_context.is_valid() {
+        Some(span_context.trace_id().to_string())
+    } else {
+        None
+    }
+}
+
+/// Record a latency exemplar for `operation`, correlated with `trace_id` if present.
+///
+/// Keeps the most recent `MAX_EXEMPLARS_PER_OP` exemplars per operation.
+pub fn record_exemplar(operation: &str, latency_ms: f64, status: u16, trace_id: Option<String>) {
+    let timestamp_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Ok(mut store) = EXEMPLAR_STORE.lock() {
+        let samples = store.entry(operation.to_string()).or_default();
+        samples.push_back(Exemplar {
+            operation: operation.to_string(),
+            latency_ms,
+            status,
+            trace_id: trace_id.unwrap_or_default(),
+            timestamp_unix_ms,
+        });
+        while samples.len() > MAX_EXEMPLARS_PER_OP {
+            samples.pop_front();
+        }
+    }
+}
+
+/// Snapshot of all retained latency exemplars (flattened across operations).
+pub fn exemplars_snapshot() -> Vec<Exemplar> {
+    EXEMPLAR_STORE
+        .lock()
+        .map(|store| store.values().flat_map(|dq| dq.iter().cloned()).collect())
+        .unwrap_or_default()
+}
 
 /// Build a `PrometheusBuilder` pre-configured with explicit histogram bucket boundaries.
 ///
 /// Centralises bucket configuration so both `init_metrics` and
 /// `configure_histogram_buckets` (used in tests) share the same settings.
+#[cfg(feature = "server")]
 pub fn build_prometheus_builder() -> Result<PrometheusBuilder, Box<dyn std::error::Error>> {
     let builder = PrometheusBuilder::new()
         .set_buckets_for_metric(
@@ -72,6 +166,7 @@ pub fn build_prometheus_builder() -> Result<PrometheusBuilder, Box<dyn std::erro
 ///
 /// This function can be called multiple times safely. It will only initialize
 /// the global metrics recorder once and return a cloned handle on subsequent calls.
+#[cfg(feature = "server")]
 pub fn init_metrics() -> Result<PrometheusHandle, Box<dyn std::error::Error>> {
     let mut init_error: Option<String> = None;
 
@@ -127,6 +222,7 @@ pub fn init_metrics() -> Result<PrometheusHandle, Box<dyn std::error::Error>> {
 /// - `rs3gw_object_size_bytes`:    [1 024, 65 536, 1 048 576, 10 485 760, 104 857 600, 1 073 741 824] bytes
 /// - `rs3gw_dedup_savings_ratio`:  [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
 /// - `rs3gw_compression_ratio`:    [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.25]
+#[cfg(feature = "server")]
 pub fn configure_histogram_buckets() {
     describe_histogram!(
         "rs3gw_request_duration_ms",
@@ -153,6 +249,7 @@ pub fn configure_histogram_buckets() {
 /// Metrics middleware layer
 ///
 /// Records Prometheus metrics and optionally feeds the MetricsTracker if state is provided
+#[cfg(feature = "server")]
 pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
     let start = Instant::now();
     let method = request.method().clone();
@@ -171,6 +268,10 @@ pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
 
     record_request(&operation, status);
     record_latency(&operation, latency_ms);
+    // `metrics_layer` runs inside `TraceLayer`'s instrumented future, so the request
+    // span is current here and its trace_id (if sampled) can be correlated with this
+    // latency sample.
+    record_exemplar(&operation, latency_ms, status, current_trace_id());
 
     response
 }
@@ -178,6 +279,7 @@ pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
 /// Metrics tracker middleware - records request/bandwidth metrics for predictive analytics
 ///
 /// This middleware should be added after metrics_layer in the middleware stack
+#[cfg(feature = "server")]
 pub async fn metrics_tracker_layer(
     axum::extract::State(state): axum::extract::State<crate::AppState>,
     request: Request<Body>,
@@ -209,6 +311,7 @@ pub async fn metrics_tracker_layer(
 }
 
 /// Check if a query string contains a specific parameter
+#[cfg(feature = "server")]
 fn has_query_param(query: Option<&str>, param: &str) -> bool {
     query.is_some_and(|q| {
         q.split('&')
@@ -217,6 +320,7 @@ fn has_query_param(query: Option<&str>, param: &str) -> bool {
 }
 
 /// Classify S3 operation from method, path, and query parameters
+#[cfg(feature = "server")]
 fn classify_operation(method: &Method, path: &str, query: Option<&str>) -> String {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
 
@@ -431,5 +535,46 @@ pub fn record_dedup_savings(bytes_saved: u64, original_bytes: u64) {
     if original_bytes > 0 {
         let ratio = bytes_saved as f64 / original_bytes as f64;
         histogram!("rs3gw_dedup_savings_ratio").record(ratio);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exemplar_store_records_and_evicts_oldest() {
+        // Unique op name so the process-global store isn't shared with other tests.
+        let op = "UnitTestExemplarEvict";
+        for i in 0..(MAX_EXEMPLARS_PER_OP + 5) {
+            record_exemplar(op, i as f64, 200, None);
+        }
+        let snap: Vec<Exemplar> = exemplars_snapshot()
+            .into_iter()
+            .filter(|e| e.operation == op)
+            .collect();
+        assert_eq!(
+            snap.len(),
+            MAX_EXEMPLARS_PER_OP,
+            "ring must cap exemplars per operation"
+        );
+        // `None` trace_id is stored as an empty string.
+        assert!(snap.iter().all(|e| e.trace_id.is_empty()));
+        // The oldest 5 (latencies 0..5) must have been evicted.
+        let min_latency = snap.iter().map(|e| e.latency_ms as u64).min().unwrap();
+        assert_eq!(min_latency, 5, "oldest exemplars evicted first");
+    }
+
+    #[test]
+    fn exemplar_records_trace_id_and_status() {
+        let op = "UnitTestExemplarTrace";
+        record_exemplar(op, 3.0, 404, Some("deadbeef".to_string()));
+        let snap: Vec<Exemplar> = exemplars_snapshot()
+            .into_iter()
+            .filter(|e| e.operation == op)
+            .collect();
+        assert!(snap
+            .iter()
+            .any(|e| e.trace_id == "deadbeef" && e.status == 404 && e.latency_ms == 3.0));
     }
 }

@@ -1,3 +1,4 @@
+#![cfg(feature = "formats")]
 //! # OutputFormat - Trait Implementations
 //!
 //! This module contains trait implementations for `OutputFormat`.

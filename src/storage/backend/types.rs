@@ -7,9 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::functions::default_true;
-// GCS SDK clients — used by GcsBackend
-#[allow(unused_imports)]
-use google_cloud_storage;
 
 /// Local filesystem backend implementation
 ///
@@ -51,26 +48,32 @@ pub enum BackendType {
     #[default]
     Local,
     /// MinIO backend (delegate to remote MinIO server)
+    #[cfg(feature = "s3")]
     MinIO,
     /// Ceph/RADOS backend
     Ceph,
     /// GlusterFS backend
     GlusterFS,
     /// AWS S3 backend (proxy)
+    #[cfg(feature = "s3")]
     S3,
     /// Google Cloud Storage backend (proxy)
+    #[cfg(feature = "gcs")]
     Gcs,
     /// Azure Blob Storage backend (proxy)
+    #[cfg(feature = "azure")]
     Azure,
 }
 /// MinIO backend implementation
 ///
 /// Delegates storage operations to a remote MinIO server using the AWS SDK
+#[cfg(feature = "s3")]
 pub struct MinIOBackend {
     pub(super) client: aws_sdk_s3::Client,
     #[allow(dead_code)]
     config: BackendConfig,
 }
+#[cfg(feature = "s3")]
 impl MinIOBackend {
     /// Create a new MinIO backend
     ///
@@ -124,11 +127,13 @@ pub struct ObjectListResult {
 /// AWS S3 backend implementation
 ///
 /// Delegates storage operations to AWS S3 using the AWS SDK
+#[cfg(feature = "s3")]
 pub struct S3Backend {
     pub(super) client: aws_sdk_s3::Client,
     #[allow(dead_code)]
     config: BackendConfig,
 }
+#[cfg(feature = "s3")]
 impl S3Backend {
     /// Create a new AWS S3 backend
     ///
@@ -180,6 +185,7 @@ impl S3Backend {
 /// The GCS resource name format is:
 /// - Buckets: `projects/_/buckets/{bucket_id}`
 /// - Objects: `projects/_/buckets/{bucket_id}/objects/{object_name}`
+#[cfg(feature = "gcs")]
 pub struct GcsBackend {
     /// Project ID used when creating buckets (e.g. "my-gcp-project")
     pub(crate) project_id: String,
@@ -191,6 +197,7 @@ pub struct GcsBackend {
     config: BackendConfig,
 }
 
+#[cfg(feature = "gcs")]
 impl GcsBackend {
     /// Create a new Google Cloud Storage backend
     ///
@@ -249,6 +256,7 @@ impl GcsBackend {
 /// Azure Blob Storage backend implementation
 ///
 /// Delegates storage operations to Azure Blob Storage using the Azure SDK
+#[cfg(feature = "azure")]
 #[allow(dead_code)] // Stub implementation - fields will be used when fully implemented
 pub struct AzureBackend {
     pub(super) storage_client: Arc<azure_storage::StorageCredentials>,
@@ -257,6 +265,7 @@ pub struct AzureBackend {
     config: BackendConfig,
 }
 
+#[cfg(feature = "azure")]
 #[allow(dead_code)] // Stub implementation - methods will be used when fully implemented
 impl AzureBackend {
     /// Create a new Azure Blob Storage backend
