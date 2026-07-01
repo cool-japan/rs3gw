@@ -89,8 +89,8 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 
 # SciRS2 Ecosystem (SCIRS2 POLICY)
-scirs2-core = "0.5.1"
-scirs2-io = "0.5.1"
+scirs2-core = "0.6.0"
+scirs2-io = "0.6.0"
 
 # Parquet support for S3 Select
 parquet = "58.3"
