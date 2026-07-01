@@ -23,13 +23,13 @@ tokio-stream = "0.1"
 # Web framework
 axum = { version = "0.8.9", features = ["multipart", "ws"] }
 tower = { version = "0.5.3", features = ["limit"] }
-tower-http = { version = "0.6.10", features = ["cors", "trace", "request-id", "util", "timeout"] }
+tower-http = { version = "0.7.0", features = ["cors", "trace", "request-id", "util", "timeout"] }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 serde_yaml = "0.9"
-quick-xml = { version = "0.40.1", features = ["serialize"] }
+quick-xml = { version = "0.41.0", features = ["serialize"] }
 toml = "1.1.2"
 
 # Error handling
@@ -40,18 +40,16 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 # OpenTelemetry distributed tracing
-# Pinned to 0.31: tracing-opentelemetry 0.32.x internally depends on opentelemetry 0.31.
-# Upgrade all four crates to 0.32 when tracing-opentelemetry 0.33 ships (tracks otel 0.32).
-opentelemetry = { version = "0.31", features = ["trace", "metrics"] }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "metrics"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "grpc-tonic"] }
-opentelemetry-semantic-conventions = "0.31"
-tracing-opentelemetry = "0.32"
+opentelemetry = { version = "0.32", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace", "metrics"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "grpc-tonic"] }
+opentelemetry-semantic-conventions = "0.32"
+tracing-opentelemetry = "0.33"
 
 # Utilities
-uuid = { version = "1.23.1", features = ["v4", "serde"] }
-chrono = { version = "0.4.44", features = ["serde"] }
-bytes = "1.11"
+uuid = { version = "1.23.4", features = ["v4", "serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+bytes = "1.12"
 futures = "0.3"
 percent-encoding = "2.3"
 regex = "1.12"
@@ -65,8 +63,8 @@ num_cpus = "1.17"
 hostname = "0.4"
 
 # Encryption
-aes-gcm = "0.10"
-chacha20poly1305 = "0.10"
+aes-gcm = "0.11"
+chacha20poly1305 = "0.11"
 md5 = "0.8"
 getrandom = "0.4"
 
@@ -93,6 +91,11 @@ scirs2-core = "0.6.0"
 scirs2-io = "0.6.0"
 
 # Parquet support for S3 Select
+# Pinned to 58.3: orc-rust 0.8.0 (latest on crates.io) has not yet updated its
+# internal arrow/parquet dependency to 59.x, and its ArrowReaderBuilder/
+# ArrowWriterBuilder types (used in src/api/select/types.rs and
+# src/api/select/tests.rs for ORC support) are not interchangeable across arrow
+# major versions. Revisit when orc-rust ships an arrow-59-compatible release.
 parquet = "58.3"
 arrow = "58.3"
 
@@ -115,7 +118,7 @@ image = "0.25.10"
 ffmpeg-next = "8.1"
 
 # WASM runtime (pure Rust)
-wasmtime = "44.0"
+wasmtime = "46.0"
 
 # Parallel processing
 rayon = "1.12"
@@ -157,14 +160,14 @@ utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 # AWS SDK for S3-compatible backends (MinIO, AWS S3)
-aws-sdk-s3 = "1.132"
-aws-config = "1.8.16"
+aws-sdk-s3 = "1.137"
+aws-config = "1.8.18"
 
 # Google Cloud Storage SDK
-google-cloud-storage = "1.12"
-google-cloud-auth = "1.10"
-google-cloud-gax = "1.10"
-google-cloud-wkt = "1.4"
+google-cloud-storage = "1.15"
+google-cloud-auth = "1.13"
+google-cloud-gax = "1.11"
+google-cloud-wkt = "1.5"
 
 # Azure Storage SDK
 azure_storage = "0.21"

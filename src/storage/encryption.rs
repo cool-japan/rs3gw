@@ -20,7 +20,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use chacha20poly1305::{ChaCha20Poly1305, Key as ChaChaKey, Nonce as ChaChaNonce};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce as ChaChaNonce};
 
 // ============================================================================
 // Error Types
@@ -437,12 +437,12 @@ impl EncryptionService {
                 actual: key.len(),
             })?;
 
-        let nonce_array = Nonce::from_slice(nonce);
+        let nonce_array = Nonce::try_from(nonce).map_err(|_| EncryptionError::EncryptionFailed)?;
 
         let ciphertext = if let Some(aad_data) = aad {
             cipher
                 .encrypt(
-                    nonce_array,
+                    &nonce_array,
                     aes_gcm::aead::Payload {
                         msg: plaintext,
                         aad: aad_data,
@@ -451,7 +451,7 @@ impl EncryptionService {
                 .map_err(|_| EncryptionError::EncryptionFailed)?
         } else {
             cipher
-                .encrypt(nonce_array, plaintext)
+                .encrypt(&nonce_array, plaintext)
                 .map_err(|_| EncryptionError::EncryptionFailed)?
         };
 
@@ -472,12 +472,12 @@ impl EncryptionService {
                 actual: key.len(),
             })?;
 
-        let nonce_array = Nonce::from_slice(nonce);
+        let nonce_array = Nonce::try_from(nonce).map_err(|_| EncryptionError::DecryptionFailed)?;
 
         let plaintext = if let Some(aad_data) = aad {
             cipher
                 .decrypt(
-                    nonce_array,
+                    &nonce_array,
                     aes_gcm::aead::Payload {
                         msg: ciphertext,
                         aad: aad_data,
@@ -486,7 +486,7 @@ impl EncryptionService {
                 .map_err(|_| EncryptionError::DecryptionFailed)?
         } else {
             cipher
-                .decrypt(nonce_array, ciphertext)
+                .decrypt(&nonce_array, ciphertext)
                 .map_err(|_| EncryptionError::DecryptionFailed)?
         };
 
@@ -501,14 +501,19 @@ impl EncryptionService {
         nonce: &[u8],
         aad: Option<&[u8]>,
     ) -> Result<Vec<u8>, EncryptionError> {
-        let key_array = ChaChaKey::from_slice(key);
-        let cipher = ChaCha20Poly1305::new(key_array);
-        let nonce_array = ChaChaNonce::from_slice(nonce);
+        let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| {
+            EncryptionError::InvalidKeyLength {
+                expected: 32,
+                actual: key.len(),
+            }
+        })?;
+        let nonce_array =
+            ChaChaNonce::try_from(nonce).map_err(|_| EncryptionError::EncryptionFailed)?;
 
         let ciphertext = if let Some(aad_data) = aad {
             cipher
                 .encrypt(
-                    nonce_array,
+                    &nonce_array,
                     chacha20poly1305::aead::Payload {
                         msg: plaintext,
                         aad: aad_data,
@@ -517,7 +522,7 @@ impl EncryptionService {
                 .map_err(|_| EncryptionError::EncryptionFailed)?
         } else {
             cipher
-                .encrypt(nonce_array, plaintext)
+                .encrypt(&nonce_array, plaintext)
                 .map_err(|_| EncryptionError::EncryptionFailed)?
         };
 
@@ -532,14 +537,19 @@ impl EncryptionService {
         nonce: &[u8],
         aad: Option<&[u8]>,
     ) -> Result<Vec<u8>, EncryptionError> {
-        let key_array = ChaChaKey::from_slice(key);
-        let cipher = ChaCha20Poly1305::new(key_array);
-        let nonce_array = ChaChaNonce::from_slice(nonce);
+        let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| {
+            EncryptionError::InvalidKeyLength {
+                expected: 32,
+                actual: key.len(),
+            }
+        })?;
+        let nonce_array =
+            ChaChaNonce::try_from(nonce).map_err(|_| EncryptionError::DecryptionFailed)?;
 
         let plaintext = if let Some(aad_data) = aad {
             cipher
                 .decrypt(
-                    nonce_array,
+                    &nonce_array,
                     chacha20poly1305::aead::Payload {
                         msg: ciphertext,
                         aad: aad_data,
@@ -548,7 +558,7 @@ impl EncryptionService {
                 .map_err(|_| EncryptionError::DecryptionFailed)?
         } else {
             cipher
-                .decrypt(nonce_array, ciphertext)
+                .decrypt(&nonce_array, ciphertext)
                 .map_err(|_| EncryptionError::DecryptionFailed)?
         };
 
