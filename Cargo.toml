@@ -78,9 +78,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 url = "2.5"
 
 # Compression
-oxiarc-zstd = "0.3.3"
-oxiarc-lz4 = "0.3.3"
-oxiarc-deflate = "0.3.3"
+oxiarc-zstd = "0.3.4"
+oxiarc-lz4 = "0.3.4"
+oxiarc-deflate = "0.3.4"
 
 # Metrics
 metrics = "0.24"
