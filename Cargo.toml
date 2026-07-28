@@ -87,8 +87,8 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 
 # SciRS2 Ecosystem (SCIRS2 POLICY)
-scirs2-core = "0.6.3"
-scirs2-io = "0.6.3"
+scirs2-core = "0.6.4"
+scirs2-io = "0.6.4"
 
 # Parquet support for S3 Select
 # Pinned to 58.3: orc-rust 0.8.0 (latest on crates.io) has not yet updated its
