@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `quick-xml` dependency renamed to the pure-Rust `oxixml-quickxml-compat` (COOLJAPAN policy), pinned via `package = "oxixml-quickxml-compat", version = "0.1.1"` in `[workspace.dependencies]`; the `serialize` feature and all existing `quick-xml` usage sites (`src/api/xml_responses/*`, `src/api/handlers/functions/select_parser.rs`) are unaffected — drop-in API compatible.
+
 ### Fixed
 
 ## [0.2.2] - 2026-06-17
